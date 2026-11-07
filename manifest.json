@@ -1,0 +1,64 @@
+{
+  "manifest_version": 3,
+  "name": "Crow Scrapper",
+  "author": "@mhrshadfm",
+  "version": "1.0.0",
+  "description": "Crow Scrapper by @mhrshadfm — Scrapes Instagram profile followers, Reels View Rate (V.R.) & Engagement Rate (ER) from 6 recent non-pinned Reels with Excel (.xlsx), CSV, and Shared Google Sheet sync.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://www.instagram.com/*",
+    "https://instagram.com/*",
+    "https://sheets.googleapis.com/*",
+    "https://script.google.com/*",
+    "https://script.googleusercontent.com/*",
+    "https://docs.google.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "action": {
+    "default_title": "Crow Scrapper by @mhrshadfm",
+    "default_popup": "src/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.instagram.com/*",
+        "https://instagram.com/*"
+      ],
+      "css": [
+        "src/content.css"
+      ],
+      "js": [
+        "src/core.js",
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icons/*"
+      ],
+      "matches": [
+        "https://www.instagram.com/*",
+        "https://instagram.com/*"
+      ]
+    }
+  ]
+}
