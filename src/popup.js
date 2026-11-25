@@ -114,6 +114,7 @@
         sheetUrl: '',
         webAppUrl: '',
         accessToken: '',
+        syncToken: '',
         autoSync: false
       };
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
@@ -135,12 +136,21 @@
     });
   }
 
-  function saveGoogleSheetConfig(config) {
+  function generateSyncToken() {
+    const bytes = new Uint8Array(18);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function saveGoogleSheetConfig(config) {
+    // The form doesn't contain the sync token; keep the stored one unless a new one is passed.
+    const existing = await getGoogleSheetConfig();
     return new Promise((resolve) => {
       const clean = {
         sheetUrl: String((config && config.sheetUrl) || '').trim(),
         webAppUrl: String((config && config.webAppUrl) || '').trim(),
         accessToken: String((config && config.accessToken) || '').trim(),
+        syncToken: String((config && config.syncToken) || existing.syncToken || '').trim(),
         autoSync: Boolean(config && config.autoSync)
       };
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
@@ -187,7 +197,7 @@
       if (syncSheetBtn) syncSheetBtn.disabled = false;
       if (result && result.ok) {
         showStatus(
-          `Google Sheet synced! Updated ${result.updatedCount || 0} existing row(s), appended ${result.appendedCount || 0} new profile(s) (0 duplicates).`,
+          `Google Sheet synced! Updated ${result.updatedCount || 0} existing row(s), appended ${result.appendedCount || 0} new profile(s) (${describeSheetSyncResult(result)}).`,
           'success'
         );
       } else {
@@ -209,6 +219,14 @@
       const res = await Core.syncProfilesToGoogleSheet(profiles, config);
       finishSync(res);
     }
+  }
+
+function describeSheetSyncResult(res) {
+    const dupRemoved = Number(res && res.duplicateRowsRemoved) || 0;
+    const dupFound = Number(res && res.duplicateRowsFound) || 0;
+    if (dupRemoved > 0) return `${dupRemoved} duplicate row(s) removed`;
+    if (dupFound > 0) return `${dupFound} duplicate row(s) already in the sheet — delete them manually`;
+    return 'no duplicates';
   }
 
   function getVrBadgeClass(band) {
@@ -274,7 +292,12 @@
       erMain.className = 'metric-main';
       erMain.textContent = erVal;
       const erBadge = document.createElement('span');
-      erBadge.className = `metric-badge ${erBenchInfo.aboveBenchmark ? 'badge-er-good' : 'badge-er-low'}`;
+      const erBadgeClass = erBenchInfo.aboveBenchmark
+        ? 'badge-er-good'
+        : Number(item.er || 0) >= erBenchInfo.benchmark * 0.5
+          ? 'badge-er-low'
+          : 'badge-er-bad';
+      erBadge.className = `metric-badge ${erBadgeClass}`;
       erBadge.title = `Benchmark for ${erBenchInfo.tier} followers: ${erBenchInfo.formatted}`;
       erBadge.textContent = `${erBenchInfo.aboveBenchmark ? '≥' : '<'}${erBenchInfo.formatted}`;
       tdEr.append(erMain, erBadge);
@@ -318,12 +341,20 @@
       priceInput.value = item.pricePerReel !== undefined && item.pricePerReel !== null ? String(item.pricePerReel) : '';
       priceInput.placeholder = '';
       priceInput.title = 'Optional Price/REEL (kept empty by default)';
-      priceInput.addEventListener('change', async () => {
+      // Save while typing (debounced) as well as on 'change': the popup is destroyed as soon as
+      // it loses focus, often before the input's 'change' event fires, which lost the edit.
+      let priceSaveTimer = null;
+      const savePrice = async () => {
+        if (priceSaveTimer) {
+          clearTimeout(priceSaveTimer);
+          priceSaveTimer = null;
+        }
         const current = await getStoredProfiles();
         const key = Core.normalizeUsernameKey(username);
         const idx = current.findIndex((p) => Core.normalizeUsernameKey(p.username) === key);
-        if (idx >= 0) {
-          current[idx].pricePerReel = priceInput.value.trim();
+        const nextPrice = priceInput.value.trim();
+        if (idx >= 0 && String(current[idx].pricePerReel || '') !== nextPrice) {
+          current[idx].pricePerReel = nextPrice;
           suppressNextStorageRender = true;
           try {
             await saveStoredProfiles(current);
@@ -333,6 +364,15 @@
             }, 50);
           }
         }
+      };
+      priceInput.addEventListener('input', () => {
+        if (priceSaveTimer) clearTimeout(priceSaveTimer);
+        priceSaveTimer = setTimeout(() => {
+          savePrice();
+        }, 300);
+      });
+      priceInput.addEventListener('change', () => {
+        savePrice();
       });
       tdPrice.appendChild(priceInput);
 
@@ -394,9 +434,13 @@
 
   if (copySheetScriptBtn) {
     copySheetScriptBtn.addEventListener('click', async () => {
-      const cfg = readSheetFormInputs();
-      await saveGoogleSheetConfig(cfg);
-      const scriptCode = Core.generateGoogleAppsScriptCode(cfg.sheetUrl);
+      const formCfg = readSheetFormInputs();
+      const existingCfg = await getGoogleSheetConfig();
+      // A per-install shared secret is baked into the script; only this extension can then write
+      // to the sheet through the deployed Web App (knowing the /exec URL alone is not enough).
+      const syncToken = existingCfg.syncToken || generateSyncToken();
+      const cfg = await saveGoogleSheetConfig({ ...formCfg, syncToken });
+      const scriptCode = Core.generateGoogleAppsScriptCode(cfg.sheetUrl, cfg.syncToken);
       try {
         await navigator.clipboard.writeText(scriptCode);
         showStatus(
@@ -455,6 +499,10 @@
 
   if (clearListBtn) {
     clearListBtn.addEventListener('click', async () => {
+      const current = await getStoredProfiles();
+      if (current.length > 0 && !window.confirm(`Remove all ${current.length} scraped profile(s)? This cannot be undone.`)) {
+        return;
+      }
       await saveStoredProfiles([]);
       renderTable([]);
       showStatus('Cleared all scraped profiles.', 'info');
@@ -476,7 +524,14 @@
 
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         const activeTab = tabs && tabs[0];
-        if (!activeTab || !activeTab.id || !/instagram\.com/i.test(activeTab.url || '')) {
+        let isInstagramTab = false;
+        try {
+          const host = new URL(activeTab && activeTab.url ? activeTab.url : '').hostname.toLowerCase();
+          isInstagramTab = host === 'instagram.com' || host === 'www.instagram.com';
+        } catch (_err) {
+          isInstagramTab = false;
+        }
+        if (!activeTab || !activeTab.id || !isInstagramTab) {
           scrapeActiveBtn.disabled = false;
           showStatus('Please open an Instagram profile page (https://www.instagram.com/<username>/) first.', 'error');
           return;

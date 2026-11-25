@@ -12,6 +12,10 @@ Created & Owned by **[@mhrshadfm](https://www.instagram.com/mhrshadfm/)**
 [![Google Sheets Sync](https://img.shields.io/badge/Google_Sheets-Live_Sync-0F9D58?style=for-the-badge&logo=googlesheets&logoColor=white)](#shared-google-sheet-live-sync)
 [![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b?style=for-the-badge)](LICENSE)
 
+<br />
+
+<img src="icons/social-preview.png" alt="Crow Scrapper by @mhrshadfm Banner" width="100%" />
+
 </div>
 
 ---
@@ -33,7 +37,7 @@ When you open any Instagram profile (`https://www.instagram.com/<username>/`), *
 - **Engagement Rate (`E.R.`) & Follower Tier Benchmarks** — Calculates `ER = ((AV LIKE + AV COMMENTS) / Follower) × 100%` and compares it against industry follower-tier benchmarks (`≤1K` to `≥100K`).
 - **Clickable Usernames Everywhere** — Every username in the extension popup, in-page floating panel, exported **Excel (`.xlsx`)**, and **Shared Google Sheet** is a clickable hyperlink that opens `https://www.instagram.com/<username>/`.
 - **Native Styled Excel (`.xlsx`) & UTF-8 CSV (`.csv`) Export** — Generates color-coded OpenXML `.xlsx` spreadsheets and `.csv` files locally with zero external dependencies.
-- **Shared Google Sheet Sync with Strict Deduplication** — Connects to any Shared Google Sheet via a **1-Click Copy Google Apps Script** (no Google Cloud OAuth setup required) or **Google Sheets REST API v4**. Existing usernames are updated in place (preserving any manual `Price/REEL` values you typed in the sheet) and are **never added twice**.
+- **Shared Google Sheet Sync with Strict Deduplication** — Connects to any Shared Google Sheet via a **1-Click Copy Google Apps Script** (no Google Cloud OAuth setup required) or **Google Sheets REST API v4**. Existing usernames are updated in place (a `Price/REEL` value typed in the sheet always wins over the extension's copy) and are **never added twice**.
 
 ---
 
@@ -84,7 +88,7 @@ Every scraped profile is stored and exported using the following 9-column struct
 ## Installation
 
 1. **Download the Release ZIP or Clone this Repository:**
-   - **Option A (Easiest):** Download **`Crow-Scrapper-v1.0.0.zip`** from the [Releases](https://github.com/mhrshadfm/crow-scrapper/releases) section and extract the folder.
+   - **Option A (Easiest):** Download **`Crow-Scrapper-v1.1.0.zip`** from the [Releases](https://github.com/mhrshadfm/crow-scrapper/releases) section and extract the folder.
    - **Option B (Git Clone):**
      ```bash
      git clone https://github.com/mhrshadfm/crow-scrapper.git
@@ -113,6 +117,8 @@ Every scraped profile is stored and exported using the following 9-column struct
    - **Who has access:** `Anyone`
 6. Click **Deploy**, copy the generated **Web App URL** (`https://script.google.com/macros/s/.../exec`), and paste it into **Apps Script Web App URL** in **Crow Scrapper**.
 7. Click **💾 Save & Sync Sheet** (and optionally enable **Auto-add/update in Google Sheet on Scrape**).
+
+> **Updating from v1.0.0?** Click **📋 Copy Google Sheet Script** again, paste it over the old code, and redeploy (**Deploy → Manage deployments → Edit → New version**). The v1.1.0 script only accepts requests that carry your extension's private sync token and always writes to *your* sheet, so knowing the Web App URL alone is no longer enough to modify it.
 
 > **Smart Deduplication:** Whenever you sync or re-scrape a profile that already exists in your Google Sheet, Crow Scrapper updates that creator's row in place and preserves any `Price/REEL` value you already entered in Column I.
 
@@ -158,6 +164,7 @@ Every scraped profile is stored and exported using the following 9-column struct
 node tests/scraper.test.js
 node tests/xlsx-and-dom.test.js
 node tests/browser-e2e.test.js
+node tests/v1.1-regressions.test.js
 ```
 
 ---

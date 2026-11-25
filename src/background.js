@@ -53,6 +53,15 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onInstalle
   });
 }
 
+// The toolbar badge is not restored when Chrome restarts, so refresh it from storage on startup.
+if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onStartup) {
+  chrome.runtime.onStartup.addListener(() => {
+    getStorageValues([STORAGE_KEY]).then((res) => {
+      updateBadgeFromList(Array.isArray(res[STORAGE_KEY]) ? res[STORAGE_KEY] : []);
+    });
+  });
+}
+
 if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes[STORAGE_KEY]) {
@@ -61,12 +70,21 @@ if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged)
   });
 }
 
+// Google Sheet syncs run one at a time. Two overlapping syncs (auto-sync after a scrape plus a
+// manual "Sync Sheet") each read the sheet, both saw a new profile as missing and both appended it.
+let sheetSyncChain = Promise.resolve();
+function enqueueSheetSync(task) {
+  const run = sheetSyncChain.then(task, task);
+  sheetSyncChain = run.catch(() => {});
+  return run;
+}
+
 if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || !message.type) return false;
 
     if (message.type === 'SYNC_GOOGLE_SHEET') {
-      (async () => {
+      enqueueSheetSync(async () => {
         try {
           if (!Core || typeof Core.syncProfilesToGoogleSheet !== 'function') {
             sendResponse({ ok: false, error: 'Core sync module unavailable.' });
@@ -91,7 +109,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
             error: err && err.message ? err.message : String(err)
           });
         }
-      })();
+      });
       return true;
     }
 

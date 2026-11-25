@@ -27,6 +27,54 @@
   const SHEET_CONFIG_KEY = 'ig_google_sheet_config';
   const IG_WEB_APP_ID = '936619743392459';
 
+  // ============================================================================
+  // Instance Ownership (extension update / re-injection safety)
+  // ============================================================================
+  // After the extension is updated or reloaded, the content script already running in an open
+  // Instagram tab is orphaned (its chrome.* APIs throw "Extension context invalidated"), and the
+  // popup may re-inject a fresh copy into the same page. The DOM is shared by both copies, so the
+  // newest copy stamps an ownership token on <html> and takes over the button, panel & listeners.
+  const INSTANCE_ATTR = 'data-crow-scrapper-instance';
+  const INSTANCE_TOKEN = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const RELOAD_REQUIRED_MESSAGE = 'Crow Scrapper was updated or reloaded — refresh this Instagram tab (F5) to continue.';
+
+  function claimInstanceOwnership() {
+    if (typeof document !== 'undefined' && document.documentElement) {
+      document.documentElement.setAttribute(INSTANCE_ATTR, INSTANCE_TOKEN);
+    }
+  }
+
+  function isCurrentInstance() {
+    if (typeof document === 'undefined' || !document.documentElement) return true;
+    const owner = document.documentElement.getAttribute(INSTANCE_ATTR);
+    return !owner || owner === INSTANCE_TOKEN;
+  }
+
+  function isExtensionContextAlive() {
+    try {
+      if (typeof chrome === 'undefined' || !chrome || !chrome.runtime) return true; // plain page / tests
+      return Boolean(chrome.runtime.id);
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  function hasChromeStorage() {
+    try {
+      return typeof chrome !== 'undefined' && Boolean(chrome && chrome.storage && chrome.storage.local);
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  function assertExtensionContextAlive() {
+    if (!isExtensionContextAlive()) {
+      throw new Error(RELOAD_REQUIRED_MESSAGE);
+    }
+  }
+
+  claimInstanceOwnership();
+
   function getWhiteCrowLogoUrl() {
     if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.getURL === 'function') {
       try {
@@ -68,117 +116,144 @@
   // Storage Helpers (chrome.storage.local with localStorage fallback)
   // ============================================================================
 
-  function getStoredProfiles() {
-    return new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get([STORAGE_KEY], (res) => {
-          const list = Array.isArray(res && res[STORAGE_KEY]) ? res[STORAGE_KEY] : [];
-          resolve(Core.deduplicateProfiles(list));
+  function chromeStorageGet(keys) {
+    return new Promise((resolve, reject) => {
+      try {
+        assertExtensionContextAlive();
+        chrome.storage.local.get(keys, (res) => {
+          const lastErr = chrome.runtime && chrome.runtime.lastError;
+          if (lastErr) {
+            reject(new Error(lastErr.message || String(lastErr)));
+            return;
+          }
+          resolve(res || {});
         });
-      } else {
-        try {
-          const raw = localStorage.getItem(STORAGE_KEY);
-          const parsed = raw ? JSON.parse(raw) : [];
-          resolve(Core.deduplicateProfiles(Array.isArray(parsed) ? parsed : []));
-        } catch (_err) {
-          resolve([]);
-        }
+      } catch (err) {
+        reject(isExtensionContextAlive() ? err : new Error(RELOAD_REQUIRED_MESSAGE));
       }
     });
   }
 
-  function saveStoredProfiles(profiles) {
-    return new Promise((resolve) => {
-      const list = Core.deduplicateProfiles(Array.isArray(profiles) ? profiles : []);
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ [STORAGE_KEY]: list }, () => {
-          resolve(list);
+  function chromeStorageSet(items) {
+    return new Promise((resolve, reject) => {
+      try {
+        assertExtensionContextAlive();
+        chrome.storage.local.set(items, () => {
+          const lastErr = chrome.runtime && chrome.runtime.lastError;
+          if (lastErr) {
+            reject(new Error(lastErr.message || String(lastErr)));
+            return;
+          }
+          resolve();
         });
-      } else {
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-        } catch (_err) {
-          // ignore storage quota errors
-        }
-        resolve(list);
+      } catch (err) {
+        reject(isExtensionContextAlive() ? err : new Error(RELOAD_REQUIRED_MESSAGE));
       }
     });
   }
 
-  function getScraperSettings() {
-    return new Promise((resolve) => {
-      const defaults = { excludeMostRecent: false };
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get([SETTINGS_KEY], (res) => {
-          const saved = res && res[SETTINGS_KEY] && typeof res[SETTINGS_KEY] === 'object' ? res[SETTINGS_KEY] : {};
-          resolve({ ...defaults, ...saved });
-        });
-      } else {
-        try {
-          const raw = localStorage.getItem(SETTINGS_KEY);
-          const parsed = raw ? JSON.parse(raw) : {};
-          resolve({ ...defaults, ...(parsed && typeof parsed === 'object' ? parsed : {}) });
-        } catch (_err) {
-          resolve(defaults);
-        }
-      }
-    });
+  function readLocalStorageJson(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch (_err) {
+      return fallback;
+    }
   }
 
-  function saveScraperSettings(settings) {
-    return new Promise((resolve) => {
-      const clean = {
-        excludeMostRecent: Boolean(settings && settings.excludeMostRecent)
-      };
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ [SETTINGS_KEY]: clean }, () => resolve(clean));
-      } else {
-        try {
-          localStorage.setItem(SETTINGS_KEY, JSON.stringify(clean));
-        } catch (_err) {
-          // ignore
-        }
-        resolve(clean);
-      }
-    });
+  function writeLocalStorageJson(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (_err) {
+      // ignore storage quota errors
+    }
   }
 
-  function getGoogleSheetConfig() {
-    return new Promise((resolve) => {
-      const defaults = {
-        sheetUrl: '',
-        webAppUrl: '',
-        accessToken: '',
-        sheetName: '',
-        autoSync: false
-      };
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get([SHEET_CONFIG_KEY], (res) => {
-          const saved = res && res[SHEET_CONFIG_KEY] && typeof res[SHEET_CONFIG_KEY] === 'object'
-            ? res[SHEET_CONFIG_KEY]
-            : {};
-          resolve({ ...defaults, ...saved });
-        });
-      } else {
-        try {
-          const raw = localStorage.getItem(SHEET_CONFIG_KEY);
-          const parsed = raw ? JSON.parse(raw) : {};
-          resolve({ ...defaults, ...(parsed && typeof parsed === 'object' ? parsed : {}) });
-        } catch (_err) {
-          resolve(defaults);
-        }
-      }
-    });
+  async function getStoredProfiles() {
+    if (hasChromeStorage()) {
+      const res = await chromeStorageGet([STORAGE_KEY]);
+      return Core.deduplicateProfiles(Array.isArray(res[STORAGE_KEY]) ? res[STORAGE_KEY] : []);
+    }
+    const parsed = readLocalStorageJson(STORAGE_KEY, []);
+    return Core.deduplicateProfiles(Array.isArray(parsed) ? parsed : []);
   }
 
-  async function upsertProfileRecord(record) {
-    const list = await getStoredProfiles();
-    return saveStoredProfiles([...list, record]);
+  async function saveStoredProfiles(profiles) {
+    const list = Core.deduplicateProfiles(Array.isArray(profiles) ? profiles : []);
+    if (hasChromeStorage()) {
+      await chromeStorageSet({ [STORAGE_KEY]: list });
+    } else {
+      writeLocalStorageJson(STORAGE_KEY, list);
+    }
+    return list;
+  }
+
+  async function getScraperSettings() {
+    const defaults = { excludeMostRecent: false };
+    let saved;
+    if (hasChromeStorage()) {
+      const res = await chromeStorageGet([SETTINGS_KEY]);
+      saved = res[SETTINGS_KEY];
+    } else {
+      saved = readLocalStorageJson(SETTINGS_KEY, {});
+    }
+    return { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
+  }
+
+  async function saveScraperSettings(settings) {
+    const clean = {
+      excludeMostRecent: Boolean(settings && settings.excludeMostRecent)
+    };
+    if (hasChromeStorage()) {
+      await chromeStorageSet({ [SETTINGS_KEY]: clean });
+    } else {
+      writeLocalStorageJson(SETTINGS_KEY, clean);
+    }
+    return clean;
+  }
+
+  async function getGoogleSheetConfig() {
+    const defaults = {
+      sheetUrl: '',
+      webAppUrl: '',
+      accessToken: '',
+      sheetName: '',
+      syncToken: '',
+      autoSync: false
+    };
+    let saved;
+    if (hasChromeStorage()) {
+      const res = await chromeStorageGet([SHEET_CONFIG_KEY]);
+      saved = res[SHEET_CONFIG_KEY];
+    } else {
+      saved = readLocalStorageJson(SHEET_CONFIG_KEY, {});
+    }
+    return { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
+  }
+
+  // Serializes read-modify-write cycles on the stored list within this page, so a scrape that
+  // finishes while a price edit / row removal is being saved can't overwrite it (lost update).
+  let storageWriteChain = Promise.resolve();
+  function withStorageLock(task) {
+    const run = storageWriteChain.then(task, task);
+    storageWriteChain = run.catch(() => {});
+    return run;
+  }
+
+  function upsertProfileRecord(record) {
+    return withStorageLock(async () => {
+      const list = await getStoredProfiles();
+      return saveStoredProfiles([...list, record]);
+    });
   }
 
   let suppressNextStorageRender = false;
 
-  async function updateProfilePrice(username, pricePerReel) {
+  function updateProfilePrice(username, pricePerReel) {
+    return withStorageLock(() => updateProfilePriceUnlocked(username, pricePerReel));
+  }
+
+  async function updateProfilePriceUnlocked(username, pricePerReel) {
     const list = await getStoredProfiles();
     const key = Core.normalizeUsernameKey(username);
     const idx = list.findIndex((item) => Core.normalizeUsernameKey(item.username) === key);
@@ -196,42 +271,70 @@
     return list;
   }
 
-  async function removeProfileRecord(username) {
-    const list = await getStoredProfiles();
-    const key = Core.normalizeUsernameKey(username);
-    const filtered = list.filter((item) => Core.normalizeUsernameKey(item.username) !== key);
-    await saveStoredProfiles(filtered);
-    return filtered;
+  function removeProfileRecord(username) {
+    return withStorageLock(async () => {
+      const list = await getStoredProfiles();
+      const key = Core.normalizeUsernameKey(username);
+      const filtered = list.filter((item) => Core.normalizeUsernameKey(item.username) !== key);
+      await saveStoredProfiles(filtered);
+      return filtered;
+    });
   }
 
-  async function clearAllProfiles() {
-    await saveStoredProfiles([]);
-    return [];
+  function clearAllProfiles() {
+    return withStorageLock(async () => {
+      await saveStoredProfiles([]);
+      return [];
+    });
   }
 
   async function syncProfilesWithGoogleSheet(profilesOverride) {
-    const [profiles, config] = await Promise.all([
-      Array.isArray(profilesOverride) ? Promise.resolve(profilesOverride) : getStoredProfiles(),
-      getGoogleSheetConfig()
-    ]);
+    let profiles;
+    let config;
+    try {
+      [profiles, config] = await Promise.all([
+        Array.isArray(profilesOverride) ? Promise.resolve(profilesOverride) : getStoredProfiles(),
+        getGoogleSheetConfig()
+      ]);
+    } catch (err) {
+      return { ok: false, error: (err && err.message) || String(err) };
+    }
+
+    const directSync = async () => {
+      try {
+        return await Core.syncProfilesToGoogleSheet(profiles, config);
+      } catch (err) {
+        return { ok: false, error: (err && err.message) || String(err) };
+      }
+    };
 
     if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+      if (!isExtensionContextAlive()) {
+        return { ok: false, error: RELOAD_REQUIRED_MESSAGE };
+      }
       return new Promise((resolve) => {
-        chrome.runtime.sendMessage(
-          { type: 'SYNC_GOOGLE_SHEET', profiles, config },
-          async (response) => {
-            if (chrome.runtime.lastError || !response) {
-              const directResult = await Core.syncProfilesToGoogleSheet(profiles, config);
-              resolve(directResult);
-              return;
+        try {
+          chrome.runtime.sendMessage(
+            { type: 'SYNC_GOOGLE_SHEET', profiles, config },
+            async (response) => {
+              const lastErr = chrome.runtime && chrome.runtime.lastError;
+              if (lastErr || !response) {
+                resolve(await directSync());
+                return;
+              }
+              resolve(response);
             }
-            resolve(response);
-          }
-        );
+          );
+        } catch (err) {
+          resolve({
+            ok: false,
+            error: isExtensionContextAlive() ? ((err && err.message) || String(err)) : RELOAD_REQUIRED_MESSAGE
+          });
+        }
       });
     }
 
-    return Core.syncProfilesToGoogleSheet(profiles, config);
+    return directSync();
   }
 
   // ============================================================================
@@ -812,7 +915,14 @@
     const searchRoot = rootDoc.querySelector('main') || rootDoc;
     const anchors = Array.from(
       searchRoot.querySelectorAll('a[href*="/p/"], a[href*="/reel/"], a[href*="/reels/"], a[href*="/tv/"]')
-    ).filter((a) => !a.closest('header') && !a.closest('#ig-scraper-panel'));
+    ).filter((a) => {
+      if (a.closest('header') || a.closest('#ig-scraper-panel')) return false;
+      // Profile tab links ("/<user>/reels/", role="tab") are navigation, not posts. They used to
+      // become a fake 0-view "dom_post_N" reel that took one of the 6 slots and dragged ER/VR down.
+      if (a.closest('[role="tablist"]') || a.getAttribute('role') === 'tab') return false;
+      const href = (a.getAttribute('href') || '').split(/[?#]/)[0];
+      return /\/(?:p|reel|reels|tv)\/[A-Za-z0-9_-]+\/?$/i.test(href);
+    });
 
     const seenShortcodes = new Set();
     const domPinnedShortcodes = new Set();
@@ -1280,8 +1390,9 @@
    * @param {Document|Element} [rootDoc=document]
    * @returns {Element|null}
    */
-  function findReelsTabLink(rootDoc = document) {
+  function findReelsTabLink(rootDoc = document, username = '') {
     if (!rootDoc || typeof rootDoc.querySelectorAll !== 'function') return null;
+    const userKey = String(username || '').trim().replace(/^@+/, '').toLowerCase();
     const mainScope = (typeof rootDoc.querySelector === 'function' && rootDoc.querySelector('main')) || rootDoc;
     const scopes = mainScope !== rootDoc ? [mainScope, rootDoc] : [rootDoc];
     for (const scope of scopes) {
@@ -1290,7 +1401,11 @@
       );
       const match = links.find((a) => {
         const href = (a.getAttribute('href') || '').split(/[?#]/)[0];
-        return /(?:^|instagram\.com)\/[^/]+\/reels\/?$/i.test(href) || /^\/reels\/?$/i.test(href);
+        // Only THIS profile's Reels tab. The global "/reels/" feed link in the sidebar used to
+        // match too: clicking it left the profile and the rescan read random feed reels.
+        const m = href.match(/(?:^|instagram\.com)\/([^/]+)\/reels\/?$/i);
+        if (!m) return false;
+        return !userKey || m[1].toLowerCase() === userKey;
       });
       if (match) return match;
     }
@@ -1333,11 +1448,20 @@
       const d = domByCode.get(p.shortcode);
       if (d) matchedDomCodes.add(d.shortcode);
 
-      const bestViews = Math.max(
-        p.views || 0,
-        s ? s.views || 0 : 0,
-        d ? d.views || 0 : 0
-      );
+      // An exact API/SSR play count is authoritative. Taking the max of all sources let a
+      // mis-parsed or mis-paired DOM badge override a correct play_count.
+      let bestViews;
+      if (p.hasReliableViews && p.views > 0) {
+        bestViews = p.views;
+      } else if (s && s.hasReliableViews && s.views > 0) {
+        bestViews = s.views;
+      } else {
+        bestViews = Math.max(
+          p.views || 0,
+          s ? s.views || 0 : 0,
+          d ? d.views || 0 : 0
+        );
+      }
       const hasReliableViews = Boolean(
         p.hasReliableViews ||
         (s && s.hasReliableViews) ||
@@ -1452,7 +1576,7 @@
       // and the user is on the main Posts tab where DOM tiles don't show Reel view badges),
       // switch to the Reels tab if available in the DOM to read the written K/M view badges!
       if (needsReelsTabViews) {
-        const reelsTabLink = findReelsTabLink(rootDoc);
+        const reelsTabLink = findReelsTabLink(rootDoc, username);
         if (reelsTabLink && typeof reelsTabLink.click === 'function') {
           try {
             reelsTabLink.click();
@@ -1509,7 +1633,7 @@
       excludeMostRecent
     });
     if (domSelected.length > 0 && domSelected.some((p) => !p.hasReliableViews)) {
-      const reelsTabLink = findReelsTabLink(rootDoc);
+      const reelsTabLink = findReelsTabLink(rootDoc, username);
       if (reelsTabLink && typeof reelsTabLink.click === 'function') {
         try {
           reelsTabLink.click();
@@ -1611,7 +1735,14 @@
 
   function ensureProfileScrapeButton(rootDoc = document) {
     const username = detectCurrentProfileUsername(rootDoc);
-    const existingBtn = rootDoc.getElementById('ig-scraper-profile-btn');
+    let existingBtn = rootDoc.getElementById('ig-scraper-profile-btn');
+
+    // A button left behind by an orphaned (pre-update) copy of this script has a dead click
+    // handler. Replace it so the freshly injected copy owns a working button.
+    if (existingBtn && existingBtn.getAttribute(INSTANCE_ATTR) !== INSTANCE_TOKEN) {
+      existingBtn.remove();
+      existingBtn = null;
+    }
 
     if (!username) {
       if (existingBtn) existingBtn.remove();
@@ -1648,6 +1779,7 @@
     btn.id = 'ig-scraper-profile-btn';
     btn.type = 'button';
     btn.className = 'ig-scraper-btn';
+    btn.setAttribute(INSTANCE_ATTR, INSTANCE_TOKEN);
     btn.setAttribute('data-username', username);
     btn.title = 'Crow Scrapper by @mhrshadfm — Scrape Followers, View Rate (V.R.) & Engagement Rate (ER) from 6 recent non-pinned Reels';
     btn.innerHTML = `<span class="ig-scraper-btn-icon">${renderCrowLogoImg('ig-scraper-btn-crow')}</span><span class="ig-scraper-btn-text">Scrape Profile</span>`;
@@ -1668,23 +1800,75 @@
     return btn;
   }
 
+  function setScrapeButtonState(btn, stateClass, text, title) {
+    btn.className = stateClass ? `ig-scraper-btn ${stateClass}` : 'ig-scraper-btn';
+    btn.innerHTML = `<span class="ig-scraper-btn-icon">${renderCrowLogoImg('ig-scraper-btn-crow')}</span><span class="ig-scraper-btn-text"></span>`;
+    const textEl = btn.querySelector('.ig-scraper-btn-text');
+    if (textEl) textEl.textContent = text;
+    if (title) btn.title = title;
+    bindCrowLogoFallback(btn);
+  }
+
+  function showPanelStatus(message, type, rootDoc = document) {
+    const statusEl = rootDoc.getElementById('ig-scraper-panel-status');
+    if (!statusEl) return;
+    statusEl.textContent = message;
+    statusEl.className = `ig-scraper-panel-status ${type}`;
+  }
+
+  function sameUsername(a, b) {
+    return Boolean(a && b) && Core.normalizeUsernameKey(a) === Core.normalizeUsernameKey(b);
+  }
+
+  /**
+   * Rejects results that would be misleading to save: a profile with no analyzable posts
+   * (private account, or no Reels/posts yet) would otherwise be stored as ER 0.00% / "Very low".
+   */
+  function assertScrapeHasPosts(metrics, username) {
+    if (!metrics || !metrics.postsAnalyzed) {
+      throw new Error(
+        `No public Reels/posts could be read for @${username}. The account may be private, have no posts yet, or Instagram did not load the grid — scroll the profile a little and retry.`
+      );
+    }
+  }
+
+  /**
+   * Throws if the user navigated to a different profile while the scrape was running, so data
+   * gathered from a mix of two profiles' DOM is never saved under one username.
+   */
+  function assertStillOnProfile(username, rootDoc = document) {
+    const nowOn = detectCurrentProfileUsername(rootDoc);
+    if (nowOn && !sameUsername(nowOn, username)) {
+      throw new Error(`You navigated away from @${username} while it was being scraped — open it again and retry.`);
+    }
+  }
+
   async function handleScrapeButtonClick(btn, rootDoc = document) {
     const currentUsername = detectCurrentProfileUsername(rootDoc) || btn.getAttribute('data-username');
     if (!currentUsername) return;
 
+    if (!isExtensionContextAlive()) {
+      setScrapeButtonState(btn, 'ig-scraper-btn-error', '⟳ Refresh tab to use Crow Scrapper', RELOAD_REQUIRED_MESSAGE);
+      return;
+    }
+
+    // The same <button> element is re-labelled when the user SPA-navigates to another profile.
+    // Only touch it again if it still belongs to the profile this scrape was started for.
+    const buttonStillForUser = () => sameUsername(btn.getAttribute('data-username'), currentUsername);
+
     btn.disabled = true;
-    btn.className = 'ig-scraper-btn ig-scraper-btn-loading';
-    btn.innerHTML = `<span class="ig-scraper-btn-icon">${renderCrowLogoImg('ig-scraper-btn-crow')}</span><span class="ig-scraper-btn-text">⏳ Scraping 6 recent reels...</span>`;
-    bindCrowLogoFallback(btn);
+    setScrapeButtonState(btn, 'ig-scraper-btn-loading', '⏳ Scraping 6 recent reels...');
 
     try {
       const metrics = await scrapeProfileData(currentUsername, rootDoc);
+      assertStillOnProfile(currentUsername, rootDoc);
+      assertScrapeHasPosts(metrics, currentUsername);
       const updatedList = await upsertProfileRecord(metrics);
 
-      btn.disabled = false;
-      btn.className = 'ig-scraper-btn ig-scraper-btn-success';
-      btn.innerHTML = `<span class="ig-scraper-btn-icon">${renderCrowLogoImg('ig-scraper-btn-crow')}</span><span class="ig-scraper-btn-text">✓ Scraped · ER ${metrics.erFormatted} · VR ${metrics.vrFormatted}</span>`;
-      bindCrowLogoFallback(btn);
+      if (buttonStillForUser()) {
+        btn.disabled = false;
+        setScrapeButtonState(btn, 'ig-scraper-btn-success', `✓ Scraped · ER ${metrics.erFormatted} · VR ${metrics.vrFormatted}`);
+      }
 
       ensureInPagePanel(rootDoc);
       await renderInPagePanelList(updatedList, rootDoc);
@@ -1693,13 +1877,28 @@
       // Auto-sync to Shared Google Sheet if configured
       const sheetCfg = await getGoogleSheetConfig();
       if (sheetCfg && sheetCfg.autoSync && (sheetCfg.webAppUrl || (sheetCfg.sheetUrl && sheetCfg.accessToken))) {
-        syncProfilesWithGoogleSheet(updatedList).catch(() => {});
+        syncProfilesWithGoogleSheet(updatedList)
+          .then((res) => {
+            if (res && !res.ok) {
+              showPanelStatus(`Auto-sync to Google Sheet failed: ${res.error || 'unknown error'}`, 'error', rootDoc);
+            }
+          })
+          .catch(() => {});
       }
     } catch (err) {
-      btn.disabled = false;
-      btn.className = 'ig-scraper-btn ig-scraper-btn-error';
-      btn.innerHTML = `<span class="ig-scraper-btn-icon">${renderCrowLogoImg('ig-scraper-btn-crow')}</span><span class="ig-scraper-btn-text">⚠️ Retry Scrape</span>`;
-      bindCrowLogoFallback(btn);
+      const message = (err && err.message) || String(err);
+      if (buttonStillForUser()) {
+        btn.disabled = false;
+        setScrapeButtonState(
+          btn,
+          'ig-scraper-btn-error',
+          isExtensionContextAlive() ? '⚠️ Retry Scrape' : '⟳ Refresh tab to use Crow Scrapper',
+          message
+        );
+      }
+      ensureInPagePanel(rootDoc);
+      showPanelExpanded(true, rootDoc);
+      showPanelStatus(message, 'error', rootDoc);
       console.error('[Crow Scrapper] Scrape error:', err);
     }
   }
@@ -1724,6 +1923,7 @@
 
   async function downloadExcelFile() {
     const list = await getStoredProfiles();
+    if (list.length === 0) throw new Error('No scraped profiles to export yet.');
     const bytes = Core.generateXlsxBytes(list);
     const blob = new Blob([bytes], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -1734,6 +1934,7 @@
 
   async function downloadCsvFile() {
     const list = await getStoredProfiles();
+    if (list.length === 0) throw new Error('No scraped profiles to export yet.');
     const csv = Core.generateCsvContent(list);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const dateStamp = new Date().toISOString().slice(0, 10);
@@ -1753,6 +1954,14 @@
     return 'ig-badge-vr-vlow';
   }
 
+function describeSheetSyncResult(res) {
+    const dupRemoved = Number(res && res.duplicateRowsRemoved) || 0;
+    const dupFound = Number(res && res.duplicateRowsFound) || 0;
+    if (dupRemoved > 0) return `${dupRemoved} duplicate row(s) removed`;
+    if (dupFound > 0) return `${dupFound} duplicate row(s) already in the sheet — delete them manually`;
+    return 'no duplicates';
+  }
+
   function showPanelExpanded(expanded, rootDoc = document) {
     const panel = rootDoc.getElementById('ig-scraper-panel');
     if (!panel) return;
@@ -1765,11 +1974,16 @@
 
   function ensureInPagePanel(rootDoc = document) {
     let panel = rootDoc.getElementById('ig-scraper-panel');
-    if (panel) return panel;
+    if (panel && panel.getAttribute(INSTANCE_ATTR) === INSTANCE_TOKEN) return panel;
+
+    // A panel created by an orphaned (pre-update) copy has dead listeners — rebuild it.
+    const keepExpanded = Boolean(panel && !panel.classList.contains('ig-scraper-panel-collapsed'));
+    if (panel) panel.remove();
 
     panel = rootDoc.createElement('div');
     panel.id = 'ig-scraper-panel';
-    panel.className = 'ig-scraper-panel ig-scraper-panel-collapsed';
+    panel.setAttribute(INSTANCE_ATTR, INSTANCE_TOKEN);
+    panel.className = keepExpanded ? 'ig-scraper-panel' : 'ig-scraper-panel ig-scraper-panel-collapsed';
     panel.innerHTML = `
       <div class="ig-scraper-panel-header" id="ig-scraper-panel-toggle">
         <div class="ig-scraper-panel-title">
@@ -1831,11 +2045,17 @@
 
     const skipCheckbox = panel.querySelector('#ig-scraper-skip-recent');
     if (skipCheckbox) {
-      getScraperSettings().then((s) => {
-        skipCheckbox.checked = Boolean(s && s.excludeMostRecent);
-      });
+      getScraperSettings()
+        .then((s) => {
+          skipCheckbox.checked = Boolean(s && s.excludeMostRecent);
+        })
+        .catch(() => {});
       skipCheckbox.addEventListener('change', async () => {
-        await saveScraperSettings({ excludeMostRecent: skipCheckbox.checked });
+        try {
+          await saveScraperSettings({ excludeMostRecent: skipCheckbox.checked });
+        } catch (err) {
+          showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
+        }
       });
     }
 
@@ -1872,7 +2092,7 @@
       const res = await syncProfilesWithGoogleSheet();
       if (statusEl) {
         if (res && res.ok) {
-          statusEl.textContent = `Synced to Google Sheet! (${res.updatedCount || 0} updated, ${res.appendedCount || 0} added, 0 duplicates)`;
+          statusEl.textContent = `Synced to Google Sheet! (${res.updatedCount || 0} updated, ${res.appendedCount || 0} added, ${describeSheetSyncResult(res)})`;
           statusEl.className = 'ig-scraper-panel-status success';
         } else {
           statusEl.textContent = (res && res.error) || 'Configure your Shared Google Sheet in the extension popup first.';
@@ -1883,21 +2103,43 @@
 
     panel.querySelector('#ig-scraper-dl-xlsx').addEventListener('click', async (e) => {
       e.stopPropagation();
-      await downloadExcelFile();
+      try {
+        await downloadExcelFile();
+      } catch (err) {
+        showPanelExpanded(true, rootDoc);
+        showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
+      }
     });
 
     panel.querySelector('#ig-scraper-dl-csv').addEventListener('click', async (e) => {
       e.stopPropagation();
-      await downloadCsvFile();
+      try {
+        await downloadCsvFile();
+      } catch (err) {
+        showPanelExpanded(true, rootDoc);
+        showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
+      }
     });
 
     panel.querySelector('#ig-scraper-clear-btn').addEventListener('click', async (e) => {
       e.stopPropagation();
-      const empty = await clearAllProfiles();
-      await renderInPagePanelList(empty, rootDoc);
+      const badge = rootDoc.getElementById('ig-scraper-count-badge');
+      const count = badge ? Number(badge.textContent) || 0 : 0;
+      if (count > 0 && typeof window !== 'undefined' && typeof window.confirm === 'function' &&
+        !window.confirm(`Remove all ${count} scraped profile(s) from Crow Scrapper? This cannot be undone.`)) {
+        return;
+      }
+      try {
+        const empty = await clearAllProfiles();
+        await renderInPagePanelList(empty, rootDoc);
+      } catch (err) {
+        showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
+      }
     });
 
-    getStoredProfiles().then((list) => renderInPagePanelList(list, rootDoc));
+    getStoredProfiles()
+      .then((list) => renderInPagePanelList(list, rootDoc))
+      .catch((err) => showPanelStatus((err && err.message) || String(err), 'error', rootDoc));
     return panel;
   }
 
@@ -1950,7 +2192,12 @@
       erSpan.className = 'ig-metric-val';
       erSpan.textContent = erVal;
       const erBadge = rootDoc.createElement('span');
-      erBadge.className = `ig-metric-badge ${erBenchInfo.aboveBenchmark ? 'ig-badge-er-good' : 'ig-badge-er-low'}`;
+      const erBadgeClass = erBenchInfo.aboveBenchmark
+        ? 'ig-badge-er-good'
+        : Number(item.er || 0) >= erBenchInfo.benchmark * 0.5
+          ? 'ig-badge-er-low'
+          : 'ig-badge-er-bad';
+      erBadge.className = `ig-metric-badge ${erBadgeClass}`;
       erBadge.title = `Benchmark for ${erBenchInfo.tier} followers: ${erBenchInfo.formatted}`;
       erBadge.textContent = `${erBenchInfo.aboveBenchmark ? '≥' : '<'}${erBenchInfo.formatted}`;
       tdEr.append(erSpan, erBadge);
@@ -1995,7 +2242,11 @@
       priceInput.placeholder = '';
       priceInput.title = 'Optional Price/REEL (kept empty by default)';
       priceInput.addEventListener('change', async () => {
-        await updateProfilePrice(username, priceInput.value);
+        try {
+          await updateProfilePrice(username, priceInput.value);
+        } catch (err) {
+          showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
+        }
       });
       tdPrice.appendChild(priceInput);
 
@@ -2008,8 +2259,12 @@
       delBtn.title = `Remove ${username}`;
       delBtn.textContent = '×';
       delBtn.addEventListener('click', async () => {
-        const updated = await removeProfileRecord(username);
-        await renderInPagePanelList(updated, rootDoc);
+        try {
+          const updated = await removeProfileRecord(username);
+          await renderInPagePanelList(updated, rootDoc);
+        } catch (err) {
+          showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
+        }
       });
       tdDel.appendChild(delBtn);
 
@@ -2022,10 +2277,13 @@
   // Message Listener (Communication with Extension Popup)
   // ============================================================================
 
-  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage && !window.__igScraperMessageListenerRegistered) {
-    window.__igScraperMessageListenerRegistered = true;
+  // Listeners are registered by every injected copy, but only the copy that currently owns the
+  // page (see INSTANCE_TOKEN) answers. A boolean "already registered" flag on window would make a
+  // re-injected copy skip registration while the orphaned copy's listeners are dead.
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage && isExtensionContextAlive()) {
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (!message || !message.type) return false;
+      if (!isCurrentInstance()) return false;
 
       if (message.type === 'GET_PAGE_STATUS') {
         const username = detectCurrentProfileUsername(document);
@@ -2035,28 +2293,37 @@
 
       if (message.type === 'SCRAPE_CURRENT_PROFILE') {
         const username = message.username || detectCurrentProfileUsername(document);
+        if (!username) {
+          sendResponse({ ok: false, error: 'Open an Instagram profile page (https://www.instagram.com/<username>/) first.' });
+          return false;
+        }
         const opts = typeof message.excludeMostRecent === 'boolean'
           ? { excludeMostRecent: message.excludeMostRecent }
           : undefined;
         scrapeProfileData(username, document, opts)
           .then(async (metrics) => {
+            assertStillOnProfile(username, document);
+            assertScrapeHasPosts(metrics, username);
             const list = await upsertProfileRecord(metrics);
             ensureInPagePanel(document);
             await renderInPagePanelList(list, document);
             const btn = document.getElementById('ig-scraper-profile-btn');
-            if (btn) {
-              btn.className = 'ig-scraper-btn ig-scraper-btn-success';
-              btn.innerHTML = `<span class="ig-scraper-btn-icon">${renderCrowLogoImg('ig-scraper-btn-crow')}</span><span class="ig-scraper-btn-text">✓ Scraped · ER ${metrics.erFormatted} · VR ${metrics.vrFormatted}</span>`;
-              bindCrowLogoFallback(btn);
+            if (btn && sameUsername(btn.getAttribute('data-username'), username)) {
+              btn.disabled = false;
+              setScrapeButtonState(btn, 'ig-scraper-btn-success', `✓ Scraped · ER ${metrics.erFormatted} · VR ${metrics.vrFormatted}`);
             }
+            sendResponse({ ok: true, metrics, profiles: list });
             const sheetCfg = await getGoogleSheetConfig();
             if (sheetCfg && sheetCfg.autoSync && (sheetCfg.webAppUrl || (sheetCfg.sheetUrl && sheetCfg.accessToken))) {
               syncProfilesWithGoogleSheet(list).catch(() => {});
             }
-            sendResponse({ ok: true, metrics, profiles: list });
           })
           .catch((err) => {
-            sendResponse({ ok: false, error: err.message || String(err) });
+            try {
+              sendResponse({ ok: false, error: (err && err.message) || String(err) });
+            } catch (_sendErr) {
+              // popup already closed
+            }
           });
         return true; // keep channel open for async response
       }
@@ -2066,16 +2333,16 @@
   }
 
   // Listen for storage updates from popup to keep in-page list synced
-  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged && !window.__igScraperStorageListenerRegistered) {
-    window.__igScraperStorageListenerRegistered = true;
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged && isExtensionContextAlive()) {
     chrome.storage.onChanged.addListener((changes, area) => {
+      if (!isCurrentInstance()) return;
       if (area === 'local' && changes[STORAGE_KEY]) {
         if (suppressNextStorageRender) {
           suppressNextStorageRender = false;
           return;
         }
         const newList = changes[STORAGE_KEY].newValue || [];
-        renderInPagePanelList(newList, document);
+        renderInPagePanelList(newList, document).catch(() => {});
       }
       if (area === 'local' && changes[SETTINGS_KEY]) {
         const newSettings = changes[SETTINGS_KEY].newValue || {};
@@ -2091,24 +2358,48 @@
   // Initialization & SPA Navigation Observer
   // ============================================================================
 
+  let contentObserver = null;
+  let pendingEnsureFrame = 0;
+
+  function teardownContentObserver() {
+    if (contentObserver) {
+      contentObserver.disconnect();
+      contentObserver = null;
+    }
+    if (pendingEnsureFrame) {
+      cancelAnimationFrame(pendingEnsureFrame);
+      pendingEnsureFrame = 0;
+    }
+  }
+
   function initContentScript() {
     if (typeof document === 'undefined' || !document.body) return;
 
     ensureProfileScrapeButton(document);
     ensureInPagePanel(document);
 
-    if (window.__igScraperObserverInitialized) return;
-    window.__igScraperObserverInitialized = true;
+    if (contentObserver) return;
 
-    let lastUrl = window.location.href;
-    const observer = new MutationObserver(() => {
-      if (window.location.href !== lastUrl) {
-        lastUrl = window.location.href;
+    // Instagram mutates the DOM constantly; coalesce bursts of mutations into a single
+    // ensureProfileScrapeButton() pass per animation frame instead of one pass per mutation.
+    contentObserver = new MutationObserver(() => {
+      if (!isCurrentInstance() || !isExtensionContextAlive()) {
+        // A newer copy of the script took over, or the extension was updated/reloaded.
+        teardownContentObserver();
+        return;
       }
-      ensureProfileScrapeButton(document);
+      if (pendingEnsureFrame) return;
+      pendingEnsureFrame = requestAnimationFrame(() => {
+        pendingEnsureFrame = 0;
+        if (!isCurrentInstance()) return;
+        ensureProfileScrapeButton(document);
+        if (!document.getElementById('ig-scraper-panel')) {
+          ensureInPagePanel(document);
+        }
+      });
     });
 
-    observer.observe(document.body, {
+    contentObserver.observe(document.body, {
       childList: true,
       subtree: true
     });

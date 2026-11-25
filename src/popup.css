@@ -423,7 +423,12 @@ body {
 
 .badge-er-low {
   background: #fef3c7;
-  color: #92400e;
+  color: #b45309;
+}
+
+.badge-er-bad {
+  background: #fee2e2;
+  color: #b91c1c;
 }
 
 .badge-vr-vhigh {
@@ -437,8 +442,8 @@ body {
 }
 
 .badge-vr-med {
-  background: #dbeafe;
-  color: #1d4ed8;
+  background: #fef3c7;
+  color: #b45309;
 }
 
 .badge-vr-low {

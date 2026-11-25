@@ -54,10 +54,23 @@
       .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
       .replace(/[\u066B٫]/g, '.')
       .replace(/[\u066C٬]/g, ',')
-      .replace(/میلیارد|ملیارد/g, 'B')
+      // Arabic Yeh (U+064A) → Persian Yeh (U+06CC) so Arabic "مليون/مليار" match the Persian forms
+      .replace(/\u064A/g, '\u06CC')
+      .replace(/میلیارد|ملیارد|ملیار/g, 'B')
       .replace(/میلیون|ملیون|ملین/g, 'M')
-      .replace(/([\d\s.,]|^)(?:mio|mln|mill(?:ion)?s?)\.?(?=$|[^a-zA-Z0-9])/gi, '$1M')
-      .replace(/هزار/g, 'K')
+      .replace(/([\d\s.,]|^)(?:mio|mln|mill(?:ion(?:e?s)?|ones|ón|on)?|milh(?:ões|ão|oes|ao))\.?(?=$|[^a-zA-Z0-9])/gi, '$1M')
+      .replace(/هزار|ألف|الف|آلاف/g, 'K')
+      // Other Instagram UI locales: es/pt "12,3 mil" = 12.3K, pt "1,2 mi" = 1.2M,
+      // ru "тыс./млн/млрд", id "rb/jt", de "Tsd.", fr "Md".
+      .replace(/(\d)\s*mil(?![a-zA-Z])\.?/gi, '$1K')
+      .replace(/(\d)\s*mi(?![a-zA-Z])\.?/gi, '$1M')
+      .replace(/(\d)\s*млрд\.?/gi, '$1B')
+      .replace(/(\d)\s*млн\.?/gi, '$1M')
+      .replace(/(\d)\s*тыс\.?/gi, '$1K')
+      .replace(/(\d)\s*rb(?![a-zA-Z])\.?/gi, '$1K')
+      .replace(/(\d)\s*jt(?![a-zA-Z])\.?/gi, '$1M')
+      .replace(/(\d)\s*tsd(?![a-zA-Z])\.?/gi, '$1K')
+      .replace(/(\d)\s*md(?![a-zA-Z])\.?/gi, '$1B')
       .trim();
     if (!str) return 0;
 
@@ -623,7 +636,10 @@
       totalViews = recentPosts.reduce((acc, p) => acc + (p.views || 0), 0);
       totalLikes = recentPosts.reduce((acc, p) => acc + (p.likes || 0), 0);
       totalComments = recentPosts.reduce((acc, p) => acc + (p.comments || 0), 0);
-      avgViews = Math.round(totalViews / count);
+      // A published Reel always has at least one play, so "0 views" means the count could not be
+      // read. Averaging those in as zeros understated AV VIEW and V.R.
+      const postsWithViews = recentPosts.filter((p) => (p.views || 0) > 0).length;
+      avgViews = postsWithViews > 0 ? Math.round(totalViews / postsWithViews) : 0;
       avgLikes = Math.round(totalLikes / count);
       avgComments = Math.round(totalComments / count);
     }
@@ -707,7 +723,11 @@
    * @returns {string}
    */
   function escapeCsvCell(val) {
-    const str = String(val ?? '');
+    let str = String(val ?? '');
+    // Neutralize spreadsheet formula injection (e.g. a Price/REEL typed as "=HYPERLINK(...)").
+    if (/^[=+\-@\t\r]/.test(str)) {
+      str = "'" + str;
+    }
     if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
       return '"' + str.replace(/"/g, '""') + '"';
     }
@@ -761,6 +781,9 @@
 
   function escapeXml(str) {
     return String(str ?? '')
+      // Control characters (e.g. pasted into Price/REEL) are illegal in XML 1.0 and made Excel
+      // reject the whole .xlsx as corrupt.
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -1319,8 +1342,10 @@
   function formatProfileForSheetRow(profile, fallbackPricePerReel = '') {
     const item = profile && typeof profile === 'object' ? profile : {};
     const cleanUsername = extractCleanUsername(item.username || item.profileUrl);
-    const profileUrl = item.profileUrl || (cleanUsername ? `https://www.instagram.com/${cleanUsername}/` : 'https://www.instagram.com/');
-    const hyperlinkFormula = `=HYPERLINK("${profileUrl}", "${cleanUsername}")`;
+    // Always build the link from the validated username and escape quotes, so no stored value can
+    // break out of the HYPERLINK() string literals and inject a different formula.
+    const profileUrl = cleanUsername ? `https://www.instagram.com/${cleanUsername}/` : 'https://www.instagram.com/';
+    const hyperlinkFormula = `=HYPERLINK("${profileUrl.replace(/"/g, '""')}", "${String(cleanUsername).replace(/"/g, '""')}")`;
 
     const followers = Math.round(Number(item.followers) || 0);
     const erFormatted = typeof item.erFormatted === 'string' && item.erFormatted
@@ -1342,7 +1367,9 @@
     const existingPrice = fallbackPricePerReel !== undefined && fallbackPricePerReel !== null
       ? String(fallbackPricePerReel).trim()
       : '';
-    const pricePerReel = ownPrice || existingPrice || '';
+    // The sheet is the shared source of truth for Price/REEL (README: "preserves any Price/REEL
+    // value you already entered"): a value typed in the sheet wins over the extension's copy.
+    const pricePerReel = existingPrice || ownPrice || '';
 
     const row = [
       hyperlinkFormula,
@@ -1457,8 +1484,9 @@
    * @param {string} [defaultSheetUrl='']
    * @returns {string}
    */
-  function generateGoogleAppsScriptCode(defaultSheetUrl = '') {
+  function generateGoogleAppsScriptCode(defaultSheetUrl = '', syncToken = '') {
     const escapedUrl = String(defaultSheetUrl || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const escapedToken = String(syncToken || '').replace(/[^A-Za-z0-9_-]/g, '');
     return [
       '/**',
       ' * Crow Scrapper (by @mhrshadfm) — Shared Google Sheet Sync Web App Script',
@@ -1467,6 +1495,9 @@
       ' * 3. Set "Execute as: Me" and "Who has access: Anyone", then copy the Web App URL into the extension.',
       ' */',
       `const DEFAULT_SHEET_URL = '${escapedUrl}';`,
+      '// Shared secret: only requests carrying this token may write to your sheet.',
+      `const SYNC_TOKEN = '${escapedToken}';`,
+      "const USERNAME_RE = /^[A-Za-z0-9._]{1,30}$/;",
       "const HEADERS = ['USERNAME', 'Follower', 'ER', 'V.R.', 'AV VIEW', 'AV LIKE', 'AV COMMENTS', 'LIKES PER COMMENT', 'Price/REEL'];",
       '',
       'function normalizeKey(val) {',
@@ -1504,6 +1535,13 @@
       '}',
       '',
       'function ensureStyledHeaders(sheet) {',
+      '  // Never overwrite row 1 of a sheet that holds something else.',
+      '  if (sheet.getLastRow() >= 1) {',
+      '    var a1 = String(sheet.getRange(1, 1, 1, 1).getValues()[0][0] || "").trim();',
+      '    if (a1 && a1.toUpperCase() !== "USERNAME") {',
+      '      throw new Error("Row 1 of the target sheet is not a Crow Scrapper header (A1 must be USERNAME). Use an empty sheet/tab.");',
+      '    }',
+      '  }',
       '  var headerRange = sheet.getRange(1, 1, 1, 9);',
       '  headerRange.setValues([HEADERS]);',
       "  headerRange.setFontWeight('bold').setHorizontalAlignment('center');",
@@ -1515,17 +1553,25 @@
       '',
       'function doPost(e) {',
       '  var lock = LockService.getScriptLock();',
-      '  lock.waitLock(25000);',
+      '  var locked = false;',
       '  try {',
+      '    lock.waitLock(25000);',
+      '    locked = true;',
       "    var payload = JSON.parse((e && e.postData && e.postData.contents) || '{}');",
-      '    var sheetUrl = payload.sheetUrl || DEFAULT_SHEET_URL;',
-      '    var ss = sheetUrl ? SpreadsheetApp.openByUrl(sheetUrl) : SpreadsheetApp.getActiveSpreadsheet();',
+      '    if (SYNC_TOKEN && payload.token !== SYNC_TOKEN) {',
+      '      throw new Error("Unauthorized: sync token mismatch. Copy the script again from Crow Scrapper and redeploy.");',
+      '    }',
+      '    // The target is fixed by this script (the URL baked in when it was copied, or the sheet the',
+      '    // script is bound to). It is never taken from the request: anyone holding the /exec URL',
+      '    // could otherwise point it at any other spreadsheet the owner can edit.',
+      '    var ss = DEFAULT_SHEET_URL ? SpreadsheetApp.openByUrl(DEFAULT_SHEET_URL) : SpreadsheetApp.getActiveSpreadsheet();',
       '    var sheet = payload.sheetName ? (ss.getSheetByName(payload.sheetName) || ss.getSheets()[0]) : ss.getSheets()[0];',
       '',
       '    ensureStyledHeaders(sheet);',
       '',
       '    var lastRow = sheet.getLastRow();',
       '    var existingMap = {};',
+      '    var mergedPrices = {};',
       '    var duplicateRows = [];',
       '    if (lastRow >= 2) {',
       '      var formulas = sheet.getRange(2, 1, lastRow - 1, 1).getFormulas();',
@@ -1542,6 +1588,7 @@
       '          duplicateRows.push(rowNum);',
       '          if (!existingMap[key].pricePerReel && existingPrice) existingMap[key].pricePerReel = existingPrice;',
       '        }',
+      '        mergedPrices[key] = existingMap[key].pricePerReel;',
       '      }',
       '    }',
       '',
@@ -1560,7 +1607,8 @@
       '        for (var j = 0; j < v2.length; j++) {',
       '          var k2 = normalizeKey(f2[j][0] || v2[j][0]);',
       '          if (k2 && !existingMap[k2]) {',
-      '            existingMap[k2] = { rowIndex: j + 2, pricePerReel: String(v2[j][8] || "").trim() };',
+      '            var cell = v2[j][8] !== undefined && v2[j][8] !== null ? String(v2[j][8]).trim() : "";',
+      '            existingMap[k2] = { rowIndex: j + 2, pricePerReel: mergedPrices[k2] || cell };',
       '          }',
       '        }',
       '      }',
@@ -1578,9 +1626,11 @@
       '      seenIncoming[uKey] = true;',
       '',
       '      var cleanUser = String(item.username || uKey).trim().replace(/^@+/, "");',
-      '      var profileUrl = item.profileUrl || ("https://www.instagram.com/" + cleanUser + "/");',
+      '      if (!USERNAME_RE.test(cleanUser)) continue;',
+      '      var profileUrl = "https://www.instagram.com/" + cleanUser + "/";',
       '      var prevPrice = existingMap[uKey] ? existingMap[uKey].pricePerReel : "";',
-      '      var price = String(item.pricePerReel || prevPrice || "").trim();',
+      '      // A price typed in the sheet wins; otherwise use the one from the extension.',
+      '      var price = String(prevPrice || item.pricePerReel || "").trim();',
       '',
       '      var rowVals = [',
       '        \'=HYPERLINK("\' + profileUrl + \'", "\' + cleanUser + \'")\',',
@@ -1616,7 +1666,7 @@
       '      error: String(err && err.message ? err.message : err)',
       "    })).setMimeType(ContentService.MimeType.JSON);",
       '  } finally {',
-      '    lock.releaseLock();',
+      '    if (locked) lock.releaseLock();',
       '  }',
       '}',
       '',
@@ -1639,11 +1689,19 @@
    * @returns {Promise<{ ok: boolean, mode?: string, updatedCount?: number, appendedCount?: number, totalSynced?: number, error?: string }>}
    */
   async function syncProfilesToGoogleSheet(profiles, config, fetchImpl) {
-    const fetcher = typeof fetchImpl === 'function'
-      ? fetchImpl
-      : typeof fetch === 'function'
-        ? fetch.bind(typeof globalThis !== 'undefined' ? globalThis : this)
-        : null;
+    const nativeFetch = typeof fetch === 'function'
+      ? fetch.bind(typeof globalThis !== 'undefined' ? globalThis : this)
+      : null;
+    // A hung request must not block the (serialized) sync queue forever.
+    const fetchWithTimeout = nativeFetch
+      ? (url, init) => {
+          if (typeof AbortController !== 'function') return nativeFetch(url, init);
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 60000);
+          return nativeFetch(url, { ...(init || {}), signal: ctrl.signal }).finally(() => clearTimeout(timer));
+        }
+      : null;
+    const fetcher = typeof fetchImpl === 'function' ? fetchImpl : fetchWithTimeout;
 
     if (!fetcher) {
       return { ok: false, error: 'Fetch API is not available in this environment.' };
@@ -1672,6 +1730,7 @@
           sheetUrl,
           spreadsheetId: parsedSheet.spreadsheetId,
           sheetName,
+          token: String(cfg.syncToken || ''),
           profiles: deduped,
           removeSheetDuplicates: true
         })
@@ -1684,11 +1743,19 @@
         };
       }
 
-      let resultJson = {};
+      let resultJson = null;
       try {
         resultJson = await response.json();
       } catch (_err) {
-        resultJson = { ok: true };
+        resultJson = null;
+      }
+      if (!resultJson || typeof resultJson !== 'object') {
+        // Apps Script answers uncaught errors / stale deployments with an HTML page (HTTP 200).
+        // Treating that as success reported "synced" when nothing was written.
+        return {
+          ok: false,
+          error: 'The Apps Script Web App did not return a valid response. Paste the latest script from Crow Scrapper, then Deploy → Manage deployments → New version (access: Anyone).'
+        };
       }
 
       if (resultJson && resultJson.ok === false) {
@@ -1811,7 +1878,10 @@
       mode: 'sheets_api',
       updatedCount: plan.updates.length,
       appendedCount: plan.appends.length,
-      totalSynced: plan.totalProfiles
+      totalSynced: plan.totalProfiles,
+      // Sheets API mode can't delete rows without extra scopes; report what it found instead of
+      // claiming "0 duplicates".
+      duplicateRowsFound: plan.duplicateSheetRowIndices.length
     };
   }
 
