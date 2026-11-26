@@ -352,19 +352,19 @@ async function runTests() {
   assert.equal(hiddenLikesMetrics.likesPerComment, 0);
   console.log('   ✓ Edge cases passed');
 
-  // 5. Test 9-Column CSV Generation (including V.R., compact K/M AV VIEW, and empty Price/REEL at the end)
-  console.log('5. Testing 9-column CSV export format...');
+  // 5. Test 10-Column CSV Generation (V.R., compact K/M AV VIEW, empty Price/REEL and ID/Phone at the end)
+  console.log('5. Testing 10-column CSV export format...');
   const csv = Core.generateCsvContent([...calculatedProfiles, millionMetrics]);
   assert.ok(
-    csv.startsWith('\uFEFFUSERNAME,Follower,ER,V.R.,AV VIEW,AV LIKE,AV COMMENTS,LIKES PER COMMENT,Price/REEL\r\n'),
-    'CSV header must match all 9 columns in exact order'
+    csv.startsWith('\uFEFFUSERNAME,Follower,ER,V.R.,AV VIEW,AV LIKE,AV COMMENTS,LIKES PER COMMENT,Price/REEL,ID/Phone\r\n'),
+    'CSV header must match all 10 columns in exact order'
   );
   assert.ok(
-    csv.includes('mmd.fate,"373,760",21.11%,32.11%,120K,"78,007",878,88.8,\r\n'),
-    'CSV row must include V.R., compact K/M AV VIEW (120K), and end with empty Price/REEL cell'
+    csv.includes('mmd.fate,"373,760",21.11%,32.11%,120K,"78,007",878,88.8,,\r\n'),
+    'CSV row must include V.R., compact K/M AV VIEW (120K), and end with empty Price/REEL + ID/Phone cells'
   );
   assert.ok(
-    csv.includes('million_creator,"500,000",16.93%,320.00%,1.6M,"83,333","1,300",64.1,\r\n'),
+    csv.includes('million_creator,"500,000",16.93%,320.00%,1.6M,"83,333","1,300",64.1,,\r\n'),
     'CSV row for million-viewed creator must display 1.6M in AV VIEW column'
   );
   console.log('   ✓ CSV export passed');
@@ -424,7 +424,7 @@ async function runTests() {
 
   // Simulate existing Google Sheet with header row, 2 existing profiles (one as =HYPERLINK, one duplicate row)
   const existingSheetRows = [
-    ['USERNAME', 'Follower', 'ER', 'V.R.', 'AV VIEW', 'AV LIKE', 'AV COMMENTS', 'LIKES PER COMMENT', 'Price/REEL'],
+    ['USERNAME', 'Follower', 'ER', 'V.R.', 'AV VIEW', 'AV LIKE', 'AV COMMENTS', 'LIKES PER COMMENT', 'Price/REEL', 'ID/Phone'],
     ['=HYPERLINK("https://www.instagram.com/mmd.fate/", "mmd.fate")', 350000, '19.00%', '30.00%', 100000, 70000, 800, 87.5, '$500'],
     ['gallery_mahshid', 100000, '15.00%', '35.00%', 40000, 15000, 300, 50, ''],
     ['@MMD.FATE', 350000, '19.00%', '30.00%', 100000, 70000, 800, 87.5, ''] // pre-existing duplicate row 4
@@ -439,11 +439,11 @@ async function runTests() {
 
   assert.equal(syncPlan.updates.length, 2, 'Must update the 2 existing profiles in place');
   assert.equal(syncPlan.updates[0].rowIndex, 2);
-  assert.equal(syncPlan.updates[0].range, 'A2:I2');
+  assert.equal(syncPlan.updates[0].range, 'A2:J2');
   assert.equal(syncPlan.updates[0].values[4], '120K', 'AV VIEW in Google Sheet must be formatted in K/M notation');
   assert.equal(syncPlan.updates[0].values[8], '$500', 'Must preserve existing $500 Price/REEL in Google Sheet');
   assert.equal(syncPlan.updates[1].rowIndex, 3);
-  assert.equal(syncPlan.updates[1].range, 'A3:I3');
+  assert.equal(syncPlan.updates[1].range, 'A3:J3');
   assert.equal(syncPlan.updates[1].values[4], '45K', 'AV VIEW in Google Sheet must be formatted in K/M notation');
   assert.equal(syncPlan.updates[1].values[8], '', 'Empty Price/REEL stays empty');
   assert.equal(syncPlan.appends.length, 1, 'Must append only the 1 new deduplicated profile (sarrftm)');
@@ -526,7 +526,7 @@ async function runTests() {
   const vm = require('node:vm');
   const scriptCode = Core.generateGoogleAppsScriptCode('https://docs.google.com/spreadsheets/d/mock_id/edit');
   const mockSheetRows = [
-    ['USERNAME', 'Follower', 'ER', 'V.R.', 'AV VIEW', 'AV LIKE', 'AV COMMENTS', 'LIKES PER COMMENT', 'Price/REEL'],
+    ['USERNAME', 'Follower', 'ER', 'V.R.', 'AV VIEW', 'AV LIKE', 'AV COMMENTS', 'LIKES PER COMMENT', 'Price/REEL', 'ID/Phone'],
     ['=HYPERLINK("https://www.instagram.com/mmd.fate/"; "@mmd.fate")', 300000, '10.00%', '20.00%', 80000, 30000, 500, 60, '$750'],
     ['=HYPERLINK("https://www.instagram.com/mmd.fate/")', 300000, '10.00%', '20.00%', 80000, 30000, 500, 60, ''], // single-arg HYPERLINK duplicate
     ['instagram.com/MMD.FATE/', 300000, '10.00%', '20.00%', 80000, 30000, 500, 60, ''] // protocol-less URL duplicate

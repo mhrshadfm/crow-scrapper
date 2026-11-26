@@ -250,15 +250,24 @@
   let suppressNextStorageRender = false;
 
   function updateProfilePrice(username, pricePerReel) {
-    return withStorageLock(() => updateProfilePriceUnlocked(username, pricePerReel));
+    return updateProfileField(username, 'pricePerReel', pricePerReel);
   }
 
-  async function updateProfilePriceUnlocked(username, pricePerReel) {
-    const list = await getStoredProfiles();
-    const key = Core.normalizeUsernameKey(username);
-    const idx = list.findIndex((item) => Core.normalizeUsernameKey(item.username) === key);
-    if (idx >= 0) {
-      list[idx].pricePerReel = String(pricePerReel || '').trim();
+  const EDITABLE_TEXT_FIELDS = new Set(['pricePerReel', 'contactInfo']);
+
+  /** Saves one free-text cell (Price/REEL or ID/Phone) without re-rendering the list. */
+  function updateProfileField(username, field, value) {
+    if (!EDITABLE_TEXT_FIELDS.has(field)) return Promise.reject(new Error(`Field "${field}" is not editable.`));
+    return withStorageLock(async () => {
+      const list = await getStoredProfiles();
+      const key = Core.normalizeUsernameKey(username);
+      const idx = list.findIndex((item) => Core.normalizeUsernameKey(item.username) === key);
+      if (idx < 0) return list;
+      const next = String(value === undefined || value === null ? '' : value).trim();
+      if (String(list[idx][field] === undefined || list[idx][field] === null ? '' : list[idx][field]) === next) {
+        return list;
+      }
+      list[idx] = { ...list[idx], [field]: next };
       suppressNextStorageRender = true;
       try {
         await saveStoredProfiles(list);
@@ -267,8 +276,27 @@
           suppressNextStorageRender = false;
         }, 50);
       }
-    }
-    return list;
+      return list;
+    });
+  }
+
+  /** Replaces a stored row exactly (used after a manual edit — no merging with the old values). */
+  function replaceProfileRecord(record) {
+    return withStorageLock(async () => {
+      const list = await getStoredProfiles();
+      const key = Core.normalizeUsernameKey(record && record.username);
+      if (!key) return list;
+      let found = false;
+      const next = list.map((item) => {
+        if (Core.normalizeUsernameKey(item.username) === key) {
+          found = true;
+          return { ...record };
+        }
+        return item;
+      });
+      if (!found) next.push({ ...record });
+      return saveStoredProfiles(next);
+    });
   }
 
   function removeProfileRecord(username) {
@@ -902,7 +930,10 @@
    * @returns {Element|null}
    */
   function findProfileHeaderElement(rootDoc = document) {
-    const headers = Array.from(rootDoc.querySelectorAll('header'));
+    // Never treat Crow Scrapper's own UI (panel / edit dialog) as the Instagram profile header.
+    const headers = Array.from(rootDoc.querySelectorAll('header')).filter(
+      (h) => !h.closest('#ig-scraper-panel') && !h.closest('.crow-ed-overlay')
+    );
     return headers.find((h) => !h.closest('article')) || headers[0] || null;
   }
 
@@ -1027,6 +1058,225 @@
    * @param {Array<{ el: Element, shortcode: string, isPinned: boolean, isReel?: boolean, isExplicitNonReel?: boolean }>} postElements
    * @param {number} [maxCount=7]
    */
+  /**
+   * True when `el` is actually shown inside `stopAt` (not display:none / hidden / transparent).
+   * Hover overlays that Instagram keeps in the DOM but hides must not count as "visible" numbers.
+   */
+  function isNodeVisibleWithin(el, stopAt) {
+    let node = el;
+    while (node && node.nodeType === 1) {
+      if (typeof getComputedStyle === 'function') {
+        const style = getComputedStyle(node);
+        // (Detached nodes report empty styles — '' must not be read as opacity 0.)
+        if (style.display === 'none' || style.visibility === 'hidden' ||
+          (style.opacity !== '' && Number(style.opacity) === 0)) {
+          return false;
+        }
+      }
+      if (node === stopAt) break;
+      node = node.parentElement;
+    }
+    if (el.isConnected && typeof el.getClientRects === 'function' && el.getClientRects().length === 0) {
+      return false;
+    }
+    return true;
+  }
+
+  const COUNT_LABEL_PATTERNS = [
+    { label: 'likes', re: /\blikes?\b|heart|لایک|پسند|curtid|j'aime|gefällt|me gusta|beğen/i },
+    { label: 'comments', re: /comment|speech|bubble|کامنت|نظر|comentario|commentaire|kommentar|yorum/i },
+    { label: 'views', re: /\bviews?\b|view count|\bplays?\b|play count|\beye\b|\breel\b|\bclip\b|بازدید|نمایش|reproducc|vues|aufrufe|görüntülen/i }
+  ];
+
+  /** Labels a count by the icon next to it (svg aria-label / <title>, aria-label or sprite class). */
+  function describeCountLabel(el, tileEl) {
+    const scopes = [el.parentElement, el.parentElement && el.parentElement.parentElement];
+    for (const scope of scopes) {
+      if (!scope || (tileEl && !tileEl.contains(scope)) || scope === tileEl) break;
+      // Stop widening once the scope also holds ANOTHER count: its icon may belong to that one
+      // (e.g. the heart next to the likes must not label the comment count).
+      const holdsOtherCount = Array.from(scope.querySelectorAll('span, div')).some(
+        (n) => n !== el && !n.contains(el) && !el.contains(n) && STANDALONE_COUNT_REGEX.test(getNonSvgCleanText(n))
+      );
+      if (holdsOtherCount) break;
+      const hints = [];
+      const iconEls = Array.from(scope.querySelectorAll('svg, [aria-label], [class*="prite"], [class*="icon" i]'))
+        .filter((n) => n !== el && !n.contains(el));
+      // A scope with icons for several different counts (e.g. the whole overlay) is ambiguous.
+      const svgCount = scope.querySelectorAll('svg').length;
+      if (svgCount > 1) continue;
+      for (const n of iconEls) {
+        hints.push(n.getAttribute('aria-label') || '');
+        const t = n.querySelector ? n.querySelector('title') : null;
+        if (t) hints.push(t.textContent || '');
+        if (typeof n.className === 'string') hints.push(n.className);
+      }
+      const text = hints.join(' ');
+      if (!text.trim()) continue;
+      for (const { label, re } of COUNT_LABEL_PATTERNS) {
+        if (re.test(text)) return label;
+      }
+    }
+    return '';
+  }
+
+  /** Visible standalone numbers inside a tile, in DOM order, with their icon labels. */
+  function readTileNumbers(tileEl) {
+    if (!tileEl) return [];
+    return extractStandaloneNumericNodes(tileEl, (el) => !el.closest('#ig-scraper-panel'))
+      .filter((n) => isNodeVisibleWithin(n.el, tileEl))
+      .map((n) => ({
+        el: n.el,
+        text: n.text,
+        value: Core.parseCount(n.text),
+        written: Core.roundToWrittenCount(n.text),
+        label: describeCountLabel(n.el, tileEl)
+      }))
+      .filter((n) => n.value > 0 || /\d/.test(n.text));
+  }
+
+  /**
+   * Works out views / likes / comments for a reel tile from what is visible BEFORE and AFTER
+   * hovering it. This does not depend on Instagram's (changing) markup:
+   * - before hovering, the only number on a reel tile is its view badge (👁 255K);
+   * - hovering adds the likes and comments;
+   * - on a reel, views are always the largest number (a reel can't have more likes than plays);
+   * - an icon label next to a number (eye / heart / comment bubble), when present, wins.
+   */
+  function resolveTileCountsFromHover(pre, post) {
+    const preList = Array.isArray(pre) ? pre : [];
+    const postList = Array.isArray(post) && post.length > 0 ? post : preList;
+    const result = { views: 0, likes: 0, comments: 0, hasViews: false, hasCounts: false };
+    if (postList.length === 0) return result;
+
+    const sameNode = (a, b) => a.el === b.el || a.el.contains(b.el) || b.el.contains(a.el);
+    const added = postList.filter((n) => !preList.some((p) => sameNode(p, n)));
+    const labeled = (label) => postList.find((n) => n.label === label) || preList.find((n) => n.label === label);
+
+    // Views
+    let viewsNode = labeled('views');
+    if (!viewsNode && preList.length === 1) viewsNode = preList[0];
+    if (!viewsNode && postList.length >= 3) {
+      viewsNode = postList.slice().sort((a, b) => b.written - a.written)[0];
+    }
+    if (viewsNode) {
+      result.views = viewsNode.written;
+      result.hasViews = result.views > 0;
+    }
+
+    // Likes & comments: labeled first, then the remaining numbers in DOM order (likes come first).
+    const rest = (added.length > 0 ? added : postList).filter(
+      (n) => !(viewsNode && sameNode(n, viewsNode)) && n.label !== 'views'
+    );
+    // A label that matches more than one number is ambiguous — fall back to DOM order for those.
+    const uniqueLabel = (label) => rest.filter((n) => n.label === label).length === 1;
+    const likesNode = uniqueLabel('likes') ? rest.find((n) => n.label === 'likes') : undefined;
+    const commentsNode = uniqueLabel('comments') ? rest.find((n) => n.label === 'comments') : undefined;
+    const unlabeled = rest.filter((n) => n !== likesNode && n !== commentsNode);
+    const likesPick = likesNode || unlabeled.shift();
+    const commentsPick = commentsNode || unlabeled.find((n) => n !== likesPick);
+    if (likesPick) result.likes = likesPick.value;
+    if (commentsPick) result.comments = commentsPick.value;
+    result.hasCounts = Boolean(likesPick || commentsPick);
+
+    // A reel can't have more likes than plays: if the view number came from position only
+    // (no icon label) and it's smaller than the likes, the biggest number is the real view count.
+    if (result.views > 0 && result.likes > result.views && !(viewsNode && viewsNode.label === 'views')) {
+      const biggest = postList.slice().sort((a, b) => b.written - a.written)[0];
+      if (biggest && biggest.written > result.likes) {
+        result.views = biggest.written;
+      } else {
+        result.views = 0;
+        result.hasViews = false;
+      }
+    }
+    return result;
+  }
+
+  async function hoverTile(el) {
+    const targets = [el, el.firstElementChild].filter(Boolean);
+    try {
+      for (const t of targets) {
+        if (typeof PointerEvent === 'function') {
+          t.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true }));
+          t.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
+        }
+        t.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+        t.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      }
+    } catch (_err) {
+      // ignore synthetic event errors
+    }
+    await new Promise((r) => setTimeout(r, 90));
+    return () => {
+      try {
+        for (const t of targets) {
+          if (typeof PointerEvent === 'function') {
+            t.dispatchEvent(new PointerEvent('pointerleave', { bubbles: true }));
+          }
+          t.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+          t.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+        }
+      } catch (_err) {
+        // ignore
+      }
+    };
+  }
+
+  /**
+   * Reads the view badge of every tile currently in the grid: the one number a reel tile shows
+   * WITHOUT hovering (or a number next to an eye / play icon). Tiles showing several numbers
+   * (an open hover overlay) are skipped instead of guessed.
+   */
+  function readViewBadges(rootDoc = document) {
+    const { postElements, domPinnedShortcodes } = scanDomGridPosts(rootDoc);
+    const domPosts = [];
+    postElements.forEach((p, index) => {
+      const tile = getPostTileContainer(p.el) || p.el;
+      const nums = readTileNumbers(tile);
+      const labeled = nums.filter((n) => n.label === 'views');
+      const badge = labeled.length === 1 ? labeled[0] : nums.length === 1 ? nums[0] : null;
+      if (badge && badge.written > 0) {
+        domPosts.push({
+          shortcode: p.shortcode,
+          views: badge.written,
+          likes: 0,
+          comments: 0,
+          isPinned: p.isPinned,
+          isReel: true,
+          hasViews: true,
+          index
+        });
+      }
+    });
+    return { domPosts, domPinnedShortcodes };
+  }
+
+  /**
+   * After clicking the profile's Reels tab, waits (up to `timeoutMs`) until the reels we need show
+   * their view badge. Instagram loads that tab asynchronously; the old fixed 0.8 s wait often read
+   * the previous grid (or nothing).
+   */
+  async function waitForReelViewBadges(rootDoc, wantedCodes, timeoutMs = 6000) {
+    const wanted = new Set(Array.from(wantedCodes || []).filter(Boolean));
+    const deadline = Date.now() + timeoutMs;
+    let best = null;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200));
+      const badges = readViewBadges(rootDoc);
+      if (badges.domPosts.length > 0 && (!best || badges.domPosts.length >= best.domPosts.length)) {
+        best = badges;
+      }
+      if (badges.domPosts.length > 0) {
+        const have = new Set(badges.domPosts.map((d) => d.shortcode));
+        if (wanted.size === 0 || Array.from(wanted).every((c) => have.has(c))) {
+          return badges;
+        }
+      }
+    }
+    return best;
+  }
+
   async function populateDomPostCountsViaHover(postElements, maxCount = Core.RECENT_POSTS_LIMIT + 1) {
     const hasNonPinnedReels = postElements.some((p) => !p.isPinned && p.isReel === true);
     const nonPinnedTargets = postElements
@@ -1035,42 +1285,45 @@
     const results = [];
 
     for (const item of nonPinnedTargets) {
+      const tile = getPostTileContainer(item.el) || item.el;
       const initialCounts = extractCountsFromDomPostTile(item.el);
+      const pre = readTileNumbers(tile);
+
+      // Always hover reels: their likes & comments only exist in the hover overlay, and reading
+      // them without the before/after comparison is what mixed up views and comments.
       let counts = initialCounts;
-      if (!counts.hasCounts) {
-        try {
-          const targets = [item.el, item.el.firstElementChild].filter(Boolean);
-          for (const t of targets) {
-            if (typeof PointerEvent === 'function') {
-              t.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true }));
-              t.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
-            }
-            t.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-            t.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-          }
-          await new Promise((r) => setTimeout(r, 60));
-          counts = extractCountsFromDomPostTile(item.el);
-          for (const t of targets) {
-            if (typeof PointerEvent === 'function') {
-              t.dispatchEvent(new PointerEvent('pointerleave', { bubbles: true }));
-            }
-            t.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
-          }
-        } catch (_err) {
-          // ignore synthetic event errors
-        }
+      let post = pre;
+      if (!counts.hasCounts || item.isReel || initialCounts.hasViews || pre.length === 1) {
+        const unhover = await hoverTile(item.el);
+        post = readTileNumbers(tile);
+        counts = extractCountsFromDomPostTile(item.el);
+        unhover();
       }
-      const mergedViews = Math.max(counts.views || 0, initialCounts.views || 0);
-      const mergedHasViews = Boolean(counts.hasViews || initialCounts.hasViews || mergedViews > 0);
+
+      const diff = resolveTileCountsFromHover(pre, post);
+      const legacyViews = Math.max(counts.views || 0, initialCounts.views || 0);
+      const legacyLikes = counts.likes || initialCounts.likes || 0;
+      const legacyComments = counts.comments || initialCounts.comments || 0;
+
+      // When the tile's numbers could be read, the before/after comparison is authoritative —
+      // including "views unknown" (e.g. the Posts grid never shows a reel's views). Falling back
+      // to the layout guess there is what turned the comment count into the view count.
+      const readable = pre.length > 0 || post.length > 0;
+      const views = readable ? diff.views : legacyViews;
+      const likes = readable && diff.hasCounts ? diff.likes : legacyLikes;
+      const comments = readable && diff.hasCounts ? diff.comments : legacyComments;
+      const hasViews = readable
+        ? views > 0
+        : Boolean(views > 0 || counts.hasViews || initialCounts.hasViews);
       results.push({
         shortcode: item.shortcode,
-        views: mergedViews,
-        likes: counts.likes || initialCounts.likes || 0,
-        comments: counts.comments || initialCounts.comments || 0,
+        views,
+        likes,
+        comments,
         isPinned: false,
-        isReel: Boolean(item.isReel || mergedHasViews),
+        isReel: Boolean(item.isReel || hasViews),
         isExplicitNonReel: Boolean(item.isExplicitNonReel),
-        hasViews: mergedHasViews
+        hasViews
       });
     }
 
@@ -1209,7 +1462,19 @@
    * @param {Set<string>} [domPinnedShortcodes]
    * @returns {Promise<{ followers: number, posts: Array<object> } | null>}
    */
+  // Why the last Instagram API attempt failed (shown in the ⚠ reasons of tile-based rows).
+  let lastApiFailure = '';
+
+  function describeApiFailure(status) {
+    if (status === 429) return 'Instagram API said "too many requests" (HTTP 429) — wait a few minutes, then re-scrape';
+    if (status === 401 || status === 403) return `Instagram API refused the request (HTTP ${status}) — make sure you are logged in, then re-scrape`;
+    if (status === 404) return 'Instagram API did not find this profile (HTTP 404)';
+    if (status) return `Instagram API answered HTTP ${status}`;
+    return 'Instagram API could not be reached';
+  }
+
   async function fetchFromInstagramApi(username, domPinnedShortcodes) {
+    lastApiFailure = '';
     if (typeof fetch !== 'function') return null;
 
     const headers = buildInstagramApiHeaders();
@@ -1224,12 +1489,19 @@
       const response = await fetch(url, {
         method: 'GET',
         credentials: 'include',
+        cache: 'no-store',
         headers
       });
 
+      if (response && !response.ok) {
+        lastApiFailure = describeApiFailure(response.status);
+      }
       if (response && response.ok) {
         const json = await response.json();
         const user = json && json.data && json.data.user;
+        if (!user) {
+          lastApiFailure = 'Instagram API returned no profile data (login may be required)';
+        }
         if (user) {
           userId = String(user.id || user.pk || user.pk_id || '');
           followers = Core.parseCount(
@@ -1254,6 +1526,7 @@
         }
       }
     } catch (_err) {
+      lastApiFailure = describeApiFailure(0);
       // Proceed to clips/feed fallbacks
     }
 
@@ -1265,6 +1538,7 @@
         const clipsRes = await fetch(clipsUrl, {
           method: 'POST',
           credentials: 'include',
+          cache: 'no-store',
           headers: {
             ...headers,
             'content-type': 'application/x-www-form-urlencoded'
@@ -1298,6 +1572,7 @@
         const feedRes = await fetch(feedUrl, {
           method: 'GET',
           credentials: 'include',
+          cache: 'no-store',
           headers
         });
         if (feedRes && feedRes.ok) {
@@ -1381,6 +1656,9 @@
 
     if (followers === 0 && posts.length === 0) {
       return null;
+    }
+    if (posts.length === 0 && !lastApiFailure) {
+      lastApiFailure = 'Instagram API returned the profile but none of its reels';
     }
     return { followers, posts };
   }
@@ -1580,15 +1858,14 @@
         if (reelsTabLink && typeof reelsTabLink.click === 'function') {
           try {
             reelsTabLink.click();
-            for (let attempt = 0; attempt < 8; attempt++) {
-              await new Promise((r) => setTimeout(r, 100));
-              const rescan = scanDomGridPosts(rootDoc);
-              if (rescan.domPosts.some((d) => d.views > 0)) {
-                domPosts = rescan.domPosts;
-                for (const code of rescan.domPinnedShortcodes) {
-                  domPinnedShortcodes.add(code);
-                }
-                break;
+            const wantedCodes = selectedBeforeTab
+              .filter((p) => p.isReel && !p.hasReliableViews)
+              .map((p) => p.shortcode);
+            const badges = await waitForReelViewBadges(rootDoc, wantedCodes);
+            if (badges) {
+              domPosts = badges.domPosts;
+              for (const code of badges.domPinnedShortcodes) {
+                domPinnedShortcodes.add(code);
               }
             }
             mergedPosts = mergePostLists(
@@ -1608,7 +1885,8 @@
         followers: bestFollowers,
         posts: mergedPosts,
         domPinnedShortcodes,
-        excludeMostRecent
+        excludeMostRecent,
+        dataSource: apiData && apiData.posts.length > 0 ? 'api' : 'page'
       });
     }
 
@@ -1637,16 +1915,13 @@
       if (reelsTabLink && typeof reelsTabLink.click === 'function') {
         try {
           reelsTabLink.click();
-          for (let attempt = 0; attempt < 8; attempt++) {
-            await new Promise((r) => setTimeout(r, 100));
-            const rescan = scanDomGridPosts(rootDoc);
-            if (rescan.domPosts.some((d) => d.views > 0)) {
-              for (const code of rescan.domPinnedShortcodes) {
-                domPinnedShortcodes.add(code);
-              }
-              finalDomPosts = mergePostLists(finalDomPosts, [], rescan.domPosts, domPinnedShortcodes);
-              break;
+          const wantedCodes = domSelected.filter((p) => !p.hasReliableViews).map((p) => p.shortcode);
+          const badges = await waitForReelViewBadges(rootDoc, wantedCodes);
+          if (badges) {
+            for (const code of badges.domPinnedShortcodes) {
+              domPinnedShortcodes.add(code);
             }
+            finalDomPosts = mergePostLists(finalDomPosts, [], badges.domPosts, domPinnedShortcodes);
           }
         } catch (_tabErr) {
           // ignore tab click errors
@@ -1659,7 +1934,9 @@
       followers: bestFollowers,
       posts: finalDomPosts,
       domPinnedShortcodes,
-      excludeMostRecent
+      excludeMostRecent,
+      dataSource: 'tiles',
+      apiNote: lastApiFailure
     });
   }
 
@@ -1809,11 +2086,43 @@
     bindCrowLogoFallback(btn);
   }
 
+  let statusHideTimer = 0;
   function showPanelStatus(message, type, rootDoc = document) {
     const statusEl = rootDoc.getElementById('ig-scraper-panel-status');
     if (!statusEl) return;
     statusEl.textContent = message;
     statusEl.className = `ig-scraper-panel-status ${type}`;
+    clearTimeout(statusHideTimer);
+    if (type === 'success' || type === 'info') {
+      statusHideTimer = setTimeout(() => {
+        statusEl.className = 'ig-scraper-panel-status hidden';
+      }, 7000);
+    }
+  }
+
+  function reportScrapeQuality(metrics, rootDoc = document) {
+    const q = Core.assessProfileQuality(metrics);
+    if (q.level === 'warn') {
+      showPanelStatus(
+        `⚠ @${metrics.username} may be mis-scraped: ${q.issues[0]} Use ✎ to fix it or ↻ to re-scrape fresh.`,
+        'warn',
+        rootDoc
+      );
+    } else {
+      showPanelStatus(
+        `✓ @${metrics.username} scraped — ER ${metrics.erFormatted} · V.R. ${metrics.vrFormatted} (${metrics.postsAnalyzed} reels)`,
+        'success',
+        rootDoc
+      );
+    }
+  }
+
+  function markHighlight(username) {
+    panelState.highlight = username;
+    clearTimeout(panelState.highlightTimer);
+    panelState.highlightTimer = setTimeout(() => {
+      panelState.highlight = '';
+    }, 6000);
   }
 
   function sameUsername(a, b) {
@@ -1871,8 +2180,10 @@
       }
 
       ensureInPagePanel(rootDoc);
+      markHighlight(metrics.username);
       await renderInPagePanelList(updatedList, rootDoc);
       showPanelExpanded(true, rootDoc);
+      reportScrapeQuality(metrics, rootDoc);
 
       // Auto-sync to Shared Google Sheet if configured
       const sheetCfg = await getGoogleSheetConfig();
@@ -1942,19 +2253,19 @@
   }
 
   // ============================================================================
-  // In-Page Collapsible List Panel (Quick Access on Instagram)
+  // In-Page Panel — top launcher icon + expandable list (v1.2.0)
   // ============================================================================
 
   function getVrBadgeClass(band) {
     const b = String(band || '').toLowerCase();
-    if (b === 'very high') return 'ig-badge-vr-vhigh';
-    if (b === 'high') return 'ig-badge-vr-high';
-    if (b === 'medium') return 'ig-badge-vr-med';
-    if (b === 'low') return 'ig-badge-vr-low';
-    return 'ig-badge-vr-vlow';
+    if (b === 'very high') return 'crow-badge-vhigh';
+    if (b === 'high') return 'crow-badge-high';
+    if (b === 'medium') return 'crow-badge-med';
+    if (b === 'low') return 'crow-badge-low';
+    return 'crow-badge-vlow';
   }
 
-function describeSheetSyncResult(res) {
+  function describeSheetSyncResult(res) {
     const dupRemoved = Number(res && res.duplicateRowsRemoved) || 0;
     const dupFound = Number(res && res.duplicateRowsFound) || 0;
     if (dupRemoved > 0) return `${dupRemoved} duplicate row(s) removed`;
@@ -1962,15 +2273,466 @@ function describeSheetSyncResult(res) {
     return 'no duplicates';
   }
 
-  function showPanelExpanded(expanded, rootDoc = document) {
-    const panel = rootDoc.getElementById('ig-scraper-panel');
-    if (!panel) return;
-    if (expanded) {
-      panel.classList.remove('ig-scraper-panel-collapsed');
+  // --------------------------------------------------------------------------
+  // Panel state & preferences
+  // --------------------------------------------------------------------------
+
+  const PANEL_PREFS_KEY = 'crow_panel_prefs';
+  const PENDING_RESCRAPE_KEY = 'crow_pending_rescrape';
+  const LAUNCHER_SIZE = 46;
+
+  const panelState = {
+    profiles: [],
+    query: '',
+    sort: 'recent',
+    highlight: '',
+    highlightTimer: 0,
+    deferredList: null,
+    expandedTouched: false,
+    // width / height: 0 = automatic size; otherwise the size the user dragged the window to.
+    prefs: { top: 16, right: 20, expanded: false, sort: 'recent', width: 0, height: 0 }
+  };
+
+  async function loadPanelPrefs() {
+    try {
+      let saved;
+      if (hasChromeStorage()) {
+        const res = await chromeStorageGet([PANEL_PREFS_KEY]);
+        saved = res[PANEL_PREFS_KEY];
+      } else {
+        saved = readLocalStorageJson(PANEL_PREFS_KEY, null);
+      }
+      if (saved && typeof saved === 'object') {
+        panelState.prefs = { ...panelState.prefs, ...saved };
+      }
+    } catch (_err) {
+      // keep defaults
+    }
+    return panelState.prefs;
+  }
+
+  let prefsSaveTimer = 0;
+  function savePanelPrefs() {
+    clearTimeout(prefsSaveTimer);
+    prefsSaveTimer = setTimeout(() => {
+      const prefs = { ...panelState.prefs };
+      if (hasChromeStorage()) {
+        chromeStorageSet({ [PANEL_PREFS_KEY]: prefs }).catch(() => {});
+      } else {
+        writeLocalStorageJson(PANEL_PREFS_KEY, prefs);
+      }
+    }, 250);
+  }
+
+  async function getPendingRescrape() {
+    if (hasChromeStorage()) {
+      const res = await chromeStorageGet([PENDING_RESCRAPE_KEY]);
+      return res[PENDING_RESCRAPE_KEY] || null;
+    }
+    return readLocalStorageJson(PENDING_RESCRAPE_KEY, null);
+  }
+
+  async function setPendingRescrape(value) {
+    if (hasChromeStorage()) {
+      await chromeStorageSet({ [PENDING_RESCRAPE_KEY]: value });
     } else {
-      panel.classList.add('ig-scraper-panel-collapsed');
+      writeLocalStorageJson(PENDING_RESCRAPE_KEY, value);
     }
   }
+
+  function clearPendingRescrape() {
+    return setPendingRescrape(null).catch(() => {});
+  }
+
+  // --------------------------------------------------------------------------
+  // Small helpers
+  // --------------------------------------------------------------------------
+
+  const AVATAR_GRADIENTS = [
+    ['#8b5cf6', '#ec4899'],
+    ['#6366f1', '#22d3ee'],
+    ['#f59e0b', '#ef4444'],
+    ['#10b981', '#3b82f6'],
+    ['#ec4899', '#f97316'],
+    ['#14b8a6', '#8b5cf6']
+  ];
+
+  function avatarStyleFor(username) {
+    let hash = 0;
+    const s = String(username || '');
+    for (let i = 0; i < s.length; i++) hash = (hash * 31 + s.charCodeAt(i)) >>> 0;
+    const [a, b] = AVATAR_GRADIENTS[hash % AVATAR_GRADIENTS.length];
+    return `linear-gradient(135deg, ${a} 0%, ${b} 100%)`;
+  }
+
+  function timeAgo(iso) {
+    const t = Date.parse(iso || '');
+    if (!Number.isFinite(t)) return '';
+    const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (sec < 60) return 'just now';
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+    if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+    return `${Math.floor(sec / 86400)}d ago`;
+  }
+
+  function sourceLabel(source) {
+    if (source === 'api') return 'API';
+    if (source === 'page') return 'page data';
+    if (source === 'tiles') return 'page tiles';
+    return '';
+  }
+
+  function qualityOf(item) {
+    try {
+      return Core.assessProfileQuality(item);
+    } catch (_err) {
+      return { level: 'ok', issues: [] };
+    }
+  }
+
+  function sortProfiles(list, sortKey) {
+    const arr = list.slice();
+    const ts = (p) => Date.parse(p.editedAt || p.scrapedAt || '') || 0;
+    switch (sortKey) {
+      case 'followers':
+        return arr.sort((a, b) => (Number(b.followers) || 0) - (Number(a.followers) || 0));
+      case 'er':
+        return arr.sort((a, b) => (Number(b.er) || 0) - (Number(a.er) || 0));
+      case 'vr':
+        return arr.sort((a, b) => (Number(b.vr) || 0) - (Number(a.vr) || 0));
+      case 'name':
+        return arr.sort((a, b) => String(a.username).localeCompare(String(b.username)));
+      case 'check':
+        return arr.sort((a, b) => {
+          const qa = qualityOf(a).level === 'warn' ? 0 : 1;
+          const qb = qualityOf(b).level === 'warn' ? 0 : 1;
+          return qa - qb || ts(b) - ts(a);
+        });
+      case 'recent':
+      default:
+        return arr.sort((a, b) => ts(b) - ts(a));
+    }
+  }
+
+  function filterProfiles(list, query) {
+    const q = String(query || '').trim().toLowerCase().replace(/^@/, '');
+    if (!q) return list;
+    return list.filter((p) =>
+      String(p.username || '').toLowerCase().includes(q) ||
+      String(p.contactInfo || '').toLowerCase().includes(q) ||
+      String(p.pricePerReel || '').toLowerCase().includes(q)
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // Toast
+  // --------------------------------------------------------------------------
+
+  let toastTimer = 0;
+  function showToast(message, type = 'info', rootDoc = document) {
+    // While the list is open, use its status line instead of covering the header buttons.
+    if (isPanelExpanded(rootDoc)) {
+      showPanelStatus(message, type, rootDoc);
+      return;
+    }
+    const toast = rootDoc.getElementById('crow-toast');
+    if (!toast) return;
+    toast.textContent = message;
+    toast.className = `crow-toast crow-toast-${type}`;
+    toast.hidden = false;
+    positionFloatingParts(rootDoc);
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast.hidden = true;
+    }, type === 'error' ? 7000 : 4200);
+  }
+
+  // --------------------------------------------------------------------------
+  // Positioning (launcher icon is draggable; the card opens next to it)
+  // --------------------------------------------------------------------------
+
+  function clamp(v, min, max) {
+    return Math.min(Math.max(v, min), Math.max(min, max));
+  }
+
+  function applyLauncherPosition(rootDoc = document) {
+    const panel = rootDoc.getElementById('ig-scraper-panel');
+    if (!panel) return;
+    const vw = window.innerWidth || 1280;
+    const vh = window.innerHeight || 800;
+    const prefs = panelState.prefs;
+    prefs.top = clamp(Number(prefs.top) || 16, 8, vh - LAUNCHER_SIZE - 8);
+    prefs.right = clamp(Number(prefs.right) || 20, 8, vw - LAUNCHER_SIZE - 8);
+    panel.style.top = `${prefs.top}px`;
+    panel.style.right = `${prefs.right}px`;
+    positionFloatingParts(rootDoc);
+  }
+
+  const CARD_MIN_WIDTH = 420;
+  const CARD_MIN_HEIGHT = 220;
+  const CARD_DEFAULT_MAX_WIDTH = 1280;
+  const CARD_EDGE = 12;
+  const CARD_GAP = 10;
+  const CARD_NARROW_WIDTH = 760;
+
+  /**
+   * Where the list window goes, given the launcher icon's rect. The window hangs off the icon
+   * (below it, or above it when the icon sits low) and lines up with the icon's right edge when
+   * the icon is on the right half of the screen, its left edge otherwise. A saved width/height
+   * (from dragging the window's edge) is kept within the screen.
+   */
+  function computeCardGeometry(rect, vw, vh, prefs) {
+    const openUp = rect.top > vh * 0.55;
+    const anchorRight = rect.left + rect.width / 2 >= vw / 2;
+    const maxWidth = Math.max(240, vw - CARD_EDGE * 2);
+    const minWidth = Math.min(CARD_MIN_WIDTH, maxWidth);
+    const savedWidth = Number(prefs && prefs.width) || 0;
+    const width = Math.round(savedWidth > 0
+      ? clamp(savedWidth, minWidth, maxWidth)
+      : Math.min(CARD_DEFAULT_MAX_WIDTH, maxWidth));
+    const left = Math.round(anchorRight
+      ? clamp(rect.right - width, CARD_EDGE, vw - width - CARD_EDGE)
+      : clamp(rect.left, CARD_EDGE, vw - width - CARD_EDGE));
+    const room = openUp ? rect.top - CARD_GAP - 16 : vh - rect.bottom - CARD_GAP - 16;
+    const maxHeight = Math.max(260, Math.round(room));
+    const savedHeight = Number(prefs && prefs.height) || 0;
+    const height = savedHeight > 0
+      ? Math.round(clamp(savedHeight, Math.min(CARD_MIN_HEIGHT, maxHeight), maxHeight))
+      : 0;
+    return {
+      openUp,
+      anchorRight,
+      width,
+      left,
+      height,
+      maxHeight,
+      top: openUp ? null : Math.round(rect.bottom + CARD_GAP),
+      bottom: openUp ? Math.round(vh - rect.top + CARD_GAP) : null
+    };
+  }
+
+  function positionFloatingParts(rootDoc = document) {
+    const launcher = rootDoc.getElementById('crow-launcher');
+    if (!launcher || typeof launcher.getBoundingClientRect !== 'function') return;
+    const rect = launcher.getBoundingClientRect();
+    const vw = window.innerWidth || 1280;
+    const vh = window.innerHeight || 800;
+    const geo = computeCardGeometry(rect, vw, vh, panelState.prefs);
+    const openUp = geo.openUp;
+    const gap = CARD_GAP;
+
+    const card = rootDoc.getElementById('ig-scraper-panel-body');
+    if (card) {
+      card.style.width = `${geo.width}px`;
+      card.style.left = `${geo.left}px`;
+      card.style.maxHeight = `${geo.maxHeight}px`;
+      card.style.height = geo.height ? `${geo.height}px` : '';
+      if (openUp) {
+        card.style.top = 'auto';
+        card.style.bottom = `${geo.bottom}px`;
+      } else {
+        card.style.bottom = 'auto';
+        card.style.top = `${geo.top}px`;
+      }
+      card.classList.toggle('crow-card-up', openUp);
+      card.classList.toggle('crow-anchor-left', !geo.anchorRight);
+      card.classList.toggle('crow-card-sized', Boolean(geo.height));
+      card.classList.toggle('crow-card-narrow', geo.width < CARD_NARROW_WIDTH);
+    }
+
+    const toast = rootDoc.getElementById('crow-toast');
+    if (toast) {
+      if (geo.anchorRight) {
+        toast.style.left = 'auto';
+        toast.style.right = `${Math.round(vw - rect.right)}px`;
+      } else {
+        toast.style.right = 'auto';
+        toast.style.left = `${Math.round(rect.left)}px`;
+      }
+      if (openUp) {
+        toast.style.top = 'auto';
+        toast.style.bottom = `${Math.round(vh - rect.top + gap)}px`;
+      } else {
+        toast.style.bottom = 'auto';
+        toast.style.top = `${Math.round(rect.bottom + gap)}px`;
+      }
+    }
+  }
+
+  function isPanelExpanded(rootDoc = document) {
+    const panel = rootDoc.getElementById('ig-scraper-panel');
+    return Boolean(panel && !panel.classList.contains('ig-scraper-panel-collapsed'));
+  }
+
+  function showPanelExpanded(expanded, rootDoc = document, options = undefined) {
+    const panel = rootDoc.getElementById('ig-scraper-panel');
+    if (!panel) return;
+    const opts = options || {};
+    if (!opts.fromPrefs) panelState.expandedTouched = true;
+    panel.classList.toggle('ig-scraper-panel-collapsed', !expanded);
+    const launcher = rootDoc.getElementById('crow-launcher');
+    if (launcher) {
+      launcher.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      launcher.title = expanded
+        ? 'Minimize Crow Scrapper (drag to move)'
+        : 'Open Crow Scrapper list (drag to move)';
+    }
+    if (expanded) {
+      const toast = rootDoc.getElementById('crow-toast');
+      if (toast) toast.hidden = true;
+      positionFloatingParts(rootDoc);
+    }
+    if (!opts.fromPrefs && panelState.prefs.expanded !== Boolean(expanded)) {
+      panelState.prefs.expanded = Boolean(expanded);
+      savePanelPrefs();
+    }
+  }
+
+  function bindLauncherDrag(launcher, rootDoc) {
+    let start = null;
+    let dragged = false;
+    let suppressClick = false;
+
+    launcher.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      start = { x: e.clientX, y: e.clientY, top: panelState.prefs.top, right: panelState.prefs.right };
+      dragged = false;
+      try {
+        launcher.setPointerCapture(e.pointerId);
+      } catch (_err) {
+        // ignore
+      }
+    });
+    launcher.addEventListener('pointermove', (e) => {
+      if (!start) return;
+      const dx = e.clientX - start.x;
+      const dy = e.clientY - start.y;
+      if (!dragged && Math.hypot(dx, dy) < 5) return;
+      dragged = true;
+      launcher.classList.add('crow-launcher-dragging');
+      panelState.prefs.top = start.top + dy;
+      panelState.prefs.right = start.right - dx;
+      applyLauncherPosition(rootDoc);
+    });
+    const finish = () => {
+      if (!start) return;
+      start = null;
+      launcher.classList.remove('crow-launcher-dragging');
+      if (dragged) {
+        suppressClick = true;
+        savePanelPrefs();
+        setTimeout(() => {
+          suppressClick = false;
+        }, 0);
+      }
+    };
+    launcher.addEventListener('pointerup', finish);
+    launcher.addEventListener('pointercancel', finish);
+    launcher.addEventListener('click', (e) => {
+      e.preventDefault();
+      if (suppressClick) return;
+      showPanelExpanded(!isPanelExpanded(rootDoc), rootDoc);
+    });
+  }
+
+  /** Set the list window's size (px; 0 = automatic) and remember it. */
+  function setPanelSize(size, rootDoc = document) {
+    const s = size || {};
+    if (s.width !== undefined) panelState.prefs.width = Math.max(0, Math.round(Number(s.width) || 0));
+    if (s.height !== undefined) panelState.prefs.height = Math.max(0, Math.round(Number(s.height) || 0));
+    positionFloatingParts(rootDoc);
+    savePanelPrefs();
+  }
+
+  /** Go back to the automatic size (both directions, or just 'x' / 'y'). */
+  function resetPanelSize(rootDoc = document, axis = 'xy') {
+    const size = {};
+    if (axis.includes('x')) size.width = 0;
+    if (axis.includes('y')) size.height = 0;
+    setPanelSize(size, rootDoc);
+  }
+
+  const RESIZE_KEY_STEP = 24;
+
+  function bindCardResize(card, rootDoc) {
+    const handles = card.querySelectorAll('[data-resize]');
+    handles.forEach((handle) => {
+      const axis = handle.getAttribute('data-resize') || 'xy';
+      let drag = null;
+
+      // Dragging away from the icon makes the window bigger, whichever side the icon is on.
+      const signs = () => ({
+        x: card.classList.contains('crow-anchor-left') ? 1 : -1,
+        y: card.classList.contains('crow-card-up') ? -1 : 1
+      });
+
+      handle.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const r = card.getBoundingClientRect();
+        const s = signs();
+        drag = { x: e.clientX, y: e.clientY, w: r.width, h: r.height, signX: s.x, signY: s.y };
+        card.classList.add('crow-card-resizing');
+        try {
+          handle.setPointerCapture(e.pointerId);
+        } catch (_err) {
+          // ignore
+        }
+      });
+      handle.addEventListener('pointermove', (e) => {
+        if (!drag) return;
+        if (axis.includes('x')) panelState.prefs.width = Math.round(drag.w + drag.signX * (e.clientX - drag.x));
+        if (axis.includes('y')) panelState.prefs.height = Math.round(drag.h + drag.signY * (e.clientY - drag.y));
+        positionFloatingParts(rootDoc);
+      });
+      const finish = () => {
+        if (!drag) return;
+        drag = null;
+        card.classList.remove('crow-card-resizing');
+        // Remember the size actually shown (dragging past the screen edge is clamped).
+        if (axis.includes('x')) panelState.prefs.width = Math.round(parseFloat(card.style.width) || 0);
+        if (axis.includes('y')) panelState.prefs.height = Math.round(parseFloat(card.style.height) || 0);
+        savePanelPrefs();
+      };
+      handle.addEventListener('pointerup', finish);
+      handle.addEventListener('pointercancel', finish);
+      handle.addEventListener('lostpointercapture', finish);
+      handle.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        resetPanelSize(rootDoc, axis);
+      });
+      handle.addEventListener('keydown', (e) => {
+        const { x: signX, y: signY } = signs();
+        const r = card.getBoundingClientRect();
+        const size = {};
+        if (axis.includes('x') && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+          const dir = e.key === 'ArrowRight' ? 1 : -1;
+          size.width = Math.round(r.width + signX * dir * RESIZE_KEY_STEP);
+        } else if (axis.includes('y') && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+          const dir = e.key === 'ArrowDown' ? 1 : -1;
+          size.height = Math.round(r.height + signY * dir * RESIZE_KEY_STEP);
+        } else if (e.key === 'Enter' || e.key === ' ' || e.key === 'Home') {
+          resetPanelSize(rootDoc, axis);
+          e.preventDefault();
+          return;
+        } else {
+          return;
+        }
+        e.preventDefault();
+        setPanelSize(size, rootDoc);
+        // Store what is shown, so a later arrow press continues from the clamped size.
+        if (size.width !== undefined) panelState.prefs.width = Math.round(parseFloat(card.style.width) || 0);
+        if (size.height !== undefined) panelState.prefs.height = Math.round(parseFloat(card.style.height) || 0);
+      });
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // Panel DOM
+  // --------------------------------------------------------------------------
+
+  const SEARCH_ICON_SVG =
+    '<svg class="crow-search-icon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Zm5.3-2.2L21 21"/></svg>';
 
   function ensureInPagePanel(rootDoc = document) {
     let panel = rootDoc.getElementById('ig-scraper-panel');
@@ -1985,146 +2747,207 @@ function describeSheetSyncResult(res) {
     panel.setAttribute(INSTANCE_ATTR, INSTANCE_TOKEN);
     panel.className = keepExpanded ? 'ig-scraper-panel' : 'ig-scraper-panel ig-scraper-panel-collapsed';
     panel.innerHTML = `
-      <div class="ig-scraper-panel-header" id="ig-scraper-panel-toggle">
-        <div class="ig-scraper-panel-title">
-          <span class="ig-scraper-logo-badge">${renderCrowLogoImg('ig-scraper-panel-crow')}</span>
-          <span class="ig-scraper-brand-name">Crow Scrapper</span>
-          <a href="https://www.instagram.com/mhrshadfm/" target="_blank" rel="noopener noreferrer" class="ig-scraper-owner-pill" title="Created &amp; Owned by @mhrshadfm">by @mhrshadfm</a>
-          <span class="ig-scraper-badge" id="ig-scraper-count-badge">0</span>
-        </div>
-        <div class="ig-scraper-panel-header-actions">
-          <button type="button" class="ig-scraper-export-btn ig-scraper-sheet-btn" id="ig-scraper-sync-sheet" title="Sync deduplicated list to connected Shared Google Sheet">☁️ Sync Sheet</button>
-          <button type="button" class="ig-scraper-export-btn ig-scraper-xlsx-btn" id="ig-scraper-dl-xlsx" title="Download Excel (.xlsx) with clickable usernames">Excel (.xlsx)</button>
-          <button type="button" class="ig-scraper-export-btn ig-scraper-csv-btn" id="ig-scraper-dl-csv" title="Download CSV (.csv)">CSV (.csv)</button>
-          <button type="button" class="ig-scraper-toggle-icon" id="ig-scraper-expand-btn" title="Toggle table">▲</button>
-        </div>
-      </div>
-      <div class="ig-scraper-panel-body" id="ig-scraper-panel-body">
-        <div class="ig-scraper-controls-row">
-          <div class="ig-scraper-subtitle">
-            <strong>6 recent non-pinned Reels</strong> · Pinned posts excluded.
+      <button type="button" class="crow-launcher" id="crow-launcher" aria-expanded="${keepExpanded ? 'true' : 'false'}" aria-controls="ig-scraper-panel-body" title="Open Crow Scrapper list (drag to move)">
+        ${renderCrowLogoImg('crow-launcher-logo')}
+        <span class="crow-launcher-badge" id="crow-launcher-badge">0</span>
+      </button>
+      <section class="crow-card" id="ig-scraper-panel-body" role="region" aria-label="Crow Scrapper list">
+        <div class="crow-card-head" id="ig-scraper-panel-toggle">
+          <div class="crow-brand">
+            <span class="ig-scraper-logo-badge">${renderCrowLogoImg('ig-scraper-panel-crow')}</span>
+            <div class="crow-brand-text">
+              <div class="crow-brand-row">
+                <span class="ig-scraper-brand-name">Crow Scrapper</span>
+                <span class="ig-scraper-badge" id="ig-scraper-count-badge" title="Profiles in your list">0</span>
+              </div>
+              <a href="https://www.instagram.com/mhrshadfm/" target="_blank" rel="noopener noreferrer" class="ig-scraper-owner-pill" title="Created &amp; Owned by @mhrshadfm">by @mhrshadfm</a>
+            </div>
           </div>
-          <label class="ig-scraper-skip-toggle" title="When checked, skips the #1 newest post/reel in addition to pinned posts">
-            <input type="checkbox" id="ig-scraper-skip-recent" />
-            <span>Skip most recent post/reel</span>
+          <div class="crow-head-actions">
+            <button type="button" class="crow-btn crow-btn-sheet" id="ig-scraper-sync-sheet" title="Sync the list to your Shared Google Sheet (no duplicates)">
+              <span aria-hidden="true">☁</span> Sync Sheet
+            </button>
+            <div class="crow-seg" role="group" aria-label="Export">
+              <button type="button" class="crow-btn" id="ig-scraper-dl-xlsx" title="Download Excel (.xlsx) with clickable usernames">Excel</button>
+              <button type="button" class="crow-btn" id="ig-scraper-dl-csv" title="Download CSV (.csv)">CSV</button>
+            </div>
+            <button type="button" class="crow-icon-btn" id="ig-scraper-expand-btn" title="Minimize to icon (Esc)" aria-label="Minimize to icon">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6 12h12"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="crow-toolbar">
+          <label class="crow-search">
+            ${SEARCH_ICON_SVG}
+            <input type="search" id="crow-search" placeholder="Search username, ID or phone" autocomplete="off" spellcheck="false" />
           </label>
+          <label class="crow-select-wrap" title="Sort the list">
+            <select id="crow-sort" aria-label="Sort">
+              <option value="recent">Newest first</option>
+              <option value="check">Needs a check first</option>
+              <option value="followers">Followers</option>
+              <option value="er">ER</option>
+              <option value="vr">V.R.</option>
+              <option value="name">Username A–Z</option>
+            </select>
+          </label>
+          <label class="crow-switch" title="Also skip the #1 newest post/reel (besides pinned posts)">
+            <input type="checkbox" id="ig-scraper-skip-recent" />
+            <span class="crow-switch-track" aria-hidden="true"></span>
+            <span class="crow-switch-label">Skip newest reel</span>
+          </label>
+          <button type="button" class="crow-chip-btn" id="crow-info-btn" aria-expanded="false" aria-controls="crow-legend">ⓘ Benchmarks</button>
         </div>
-        <div class="ig-scraper-benchmarks-bar">
-          <span><strong>V.R. Bands:</strong> Very low ≤10% · Low 10-15% · Medium 15-30% · High 30-50% · Very high ≥50%</span>
-          <span><strong>E.R. Benchmarks:</strong> ≤1K: 8% · 1K-5K: 5.7% · 5K-10K: 4% · 10K-100K: 2.4% · ≥100K: 1.7%</span>
+
+        <div class="crow-legend" id="crow-legend" hidden>
+          <div><strong>V.R. bands</strong> Very low ≤10% · Low 10–15% · Medium 15–30% · High 30–50% · Very high ≥50%</div>
+          <div><strong>E.R. benchmarks</strong> ≤1K: 8% · 1K–5K: 5.7% · 5K–10K: 4% · 10K–100K: 2.4% · ≥100K: 1.7%</div>
+          <div class="crow-legend-note">Uses the 6 most recent non-pinned Reels. Rows marked ⚠ look mis-scraped — open ✎ to fix them or ↻ to re-scrape fresh.</div>
+          <div class="crow-legend-note">Drag this window's edge or corner to resize it — double-click the edge to go back to the automatic size.</div>
         </div>
+
         <div id="ig-scraper-panel-status" class="ig-scraper-panel-status hidden"></div>
-        <div class="ig-scraper-table-wrap">
-          <table class="ig-scraper-table" id="ig-scraper-table">
+
+        <div class="ig-scraper-table-wrap crow-table-wrap">
+          <table class="ig-scraper-table crow-table" id="ig-scraper-table">
             <thead>
               <tr>
                 <th class="col-username">USERNAME</th>
-                <th class="col-follower">Follower</th>
-                <th class="col-er">ER</th>
-                <th class="col-vr">V.R.</th>
-                <th class="col-avview">AV VIEW</th>
-                <th class="col-avlike">AV LIKE</th>
-                <th class="col-avcomments">AV COMMENTS</th>
-                <th class="col-lpc">LIKES PER COMMENT</th>
+                <th class="col-num">Follower</th>
+                <th class="col-num">ER</th>
+                <th class="col-num">V.R.</th>
+                <th class="col-num">AV VIEW</th>
+                <th class="col-num">AV LIKE</th>
+                <th class="col-num">AV COMMENTS</th>
+                <th class="col-num">LIKES PER COMMENT</th>
                 <th class="col-price">Price/REEL</th>
-                <th class="col-del"></th>
+                <th class="col-contact">ID/Phone</th>
+                <th class="col-actions"><span class="crow-visually-hidden">Actions</span></th>
               </tr>
             </thead>
             <tbody id="ig-scraper-tbody"></tbody>
           </table>
         </div>
-        <div class="ig-scraper-panel-footer">
+
+        <div class="ig-scraper-panel-footer crow-card-foot">
           <span class="ig-scraper-footer-owner">Crow Scrapper · Owner: <a href="https://www.instagram.com/mhrshadfm/" target="_blank" rel="noopener noreferrer" class="ig-scraper-footer-owner-link">@mhrshadfm</a></span>
-          <button type="button" class="ig-scraper-clear-btn" id="ig-scraper-clear-btn">Clear List</button>
+          <span class="crow-foot-summary" id="crow-foot-summary"></span>
+          <button type="button" class="crow-btn crow-btn-danger ig-scraper-clear-btn" id="ig-scraper-clear-btn">Clear List</button>
         </div>
-      </div>
+        <div class="crow-resize crow-resize-x" data-resize="x" role="separator" aria-orientation="vertical" aria-label="Resize width (arrow keys; Enter resets)" title="Drag to change the width · double-click to reset" tabindex="0"></div>
+        <div class="crow-resize crow-resize-y" data-resize="y" role="separator" aria-orientation="horizontal" aria-label="Resize height (arrow keys; Enter resets)" title="Drag to change the height · double-click to reset" tabindex="0"></div>
+        <div class="crow-resize crow-resize-xy" data-resize="xy" aria-label="Resize window" title="Drag to resize · double-click to reset the size" tabindex="-1">
+          <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M11 4 4 11M11 8 8 11"/></svg>
+        </div>
+      </section>
+      <div class="crow-toast" id="crow-toast" role="status" aria-live="polite" hidden></div>
     `;
 
     rootDoc.body.appendChild(panel);
     bindCrowLogoFallback(panel);
 
-    const skipCheckbox = panel.querySelector('#ig-scraper-skip-recent');
-    if (skipCheckbox) {
-      getScraperSettings()
-        .then((s) => {
-          skipCheckbox.checked = Boolean(s && s.excludeMostRecent);
-        })
-        .catch(() => {});
-      skipCheckbox.addEventListener('change', async () => {
-        try {
-          await saveScraperSettings({ excludeMostRecent: skipCheckbox.checked });
-        } catch (err) {
-          showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
+    // Keep Instagram's document-level shortcuts & SPA click handlers away from the panel.
+    ['click', 'keydown', 'keyup', 'keypress', 'mousedown', 'pointerdown', 'wheel'].forEach((type) => {
+      panel.addEventListener(type, (e) => {
+        if (type === 'keydown' && e.key === 'Escape' && isPanelExpanded(rootDoc)) {
+          const active = rootDoc.activeElement;
+          if (active && active.id === 'crow-search' && active.value) {
+            active.value = '';
+            panelState.query = '';
+            renderPanelRows(rootDoc);
+          } else {
+            showPanelExpanded(false, rootDoc);
+            const launcher = rootDoc.getElementById('crow-launcher');
+            if (launcher) launcher.focus();
+          }
         }
-      });
-    }
-
-    panel.querySelector('#ig-scraper-expand-btn').addEventListener('click', (e) => {
-      e.stopPropagation();
-      const isCollapsed = panel.classList.contains('ig-scraper-panel-collapsed');
-      showPanelExpanded(isCollapsed, rootDoc);
-    });
-
-    panel.querySelectorAll('a.ig-scraper-owner-pill, a.ig-scraper-footer-owner-link').forEach((linkEl) => {
-      linkEl.addEventListener('click', (e) => {
         e.stopPropagation();
       });
     });
 
-    panel.querySelector('#ig-scraper-panel-toggle').addEventListener('click', (e) => {
-      const targetEl = e.target && typeof e.target.closest === 'function'
-        ? e.target
-        : (e.target && e.target.parentElement);
-      if (targetEl && targetEl.closest('a')) return;
-      if (targetEl && targetEl.closest('button') && targetEl.id !== 'ig-scraper-expand-btn') return;
-      const isCollapsed = panel.classList.contains('ig-scraper-panel-collapsed');
-      showPanelExpanded(isCollapsed, rootDoc);
+    const launcher = panel.querySelector('#crow-launcher');
+    bindLauncherDrag(launcher, rootDoc);
+    bindCardResize(panel.querySelector('#ig-scraper-panel-body'), rootDoc);
+
+    panel.querySelector('#ig-scraper-expand-btn').addEventListener('click', () => {
+      showPanelExpanded(false, rootDoc);
+    });
+
+    const skipCheckbox = panel.querySelector('#ig-scraper-skip-recent');
+    getScraperSettings()
+      .then((s) => {
+        skipCheckbox.checked = Boolean(s && s.excludeMostRecent);
+      })
+      .catch(() => {});
+    skipCheckbox.addEventListener('change', async () => {
+      try {
+        await saveScraperSettings({ excludeMostRecent: skipCheckbox.checked });
+        showToast(
+          skipCheckbox.checked
+            ? 'The newest reel will also be skipped on the next scrape.'
+            : 'The newest reel will be included again.',
+          'info',
+          rootDoc
+        );
+      } catch (err) {
+        showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
+      }
+    });
+
+    const infoBtn = panel.querySelector('#crow-info-btn');
+    const legend = panel.querySelector('#crow-legend');
+    infoBtn.addEventListener('click', () => {
+      legend.hidden = !legend.hidden;
+      infoBtn.setAttribute('aria-expanded', legend.hidden ? 'false' : 'true');
+    });
+
+    const search = panel.querySelector('#crow-search');
+    search.addEventListener('input', () => {
+      panelState.query = search.value;
+      renderPanelRows(rootDoc);
+    });
+
+    const sortSel = panel.querySelector('#crow-sort');
+    sortSel.addEventListener('change', () => {
+      panelState.sort = sortSel.value;
+      panelState.prefs.sort = sortSel.value;
+      savePanelPrefs();
+      renderPanelRows(rootDoc);
     });
 
     panel.querySelector('#ig-scraper-sync-sheet').addEventListener('click', async (e) => {
-      e.stopPropagation();
-      showPanelExpanded(true, rootDoc);
-      const statusEl = panel.querySelector('#ig-scraper-panel-status');
-      if (statusEl) {
-        statusEl.textContent = 'Syncing deduplicated list to Google Sheet...';
-        statusEl.className = 'ig-scraper-panel-status info';
-      }
-      const res = await syncProfilesWithGoogleSheet();
-      if (statusEl) {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      showPanelStatus('Syncing the list to your Google Sheet…', 'info', rootDoc);
+      try {
+        const res = await syncProfilesWithGoogleSheet();
         if (res && res.ok) {
-          statusEl.textContent = `Synced to Google Sheet! (${res.updatedCount || 0} updated, ${res.appendedCount || 0} added, ${describeSheetSyncResult(res)})`;
-          statusEl.className = 'ig-scraper-panel-status success';
+          showPanelStatus(
+            `Synced to Google Sheet — ${res.updatedCount || 0} updated, ${res.appendedCount || 0} added, ${describeSheetSyncResult(res)}.`,
+            'success',
+            rootDoc
+          );
         } else {
-          statusEl.textContent = (res && res.error) || 'Configure your Shared Google Sheet in the extension popup first.';
-          statusEl.className = 'ig-scraper-panel-status error';
+          showPanelStatus((res && res.error) || 'Configure your Shared Google Sheet in the extension popup first.', 'error', rootDoc);
         }
+      } finally {
+        btn.disabled = false;
       }
     });
 
-    panel.querySelector('#ig-scraper-dl-xlsx').addEventListener('click', async (e) => {
-      e.stopPropagation();
+    const exportHandler = (fn) => async () => {
       try {
-        await downloadExcelFile();
+        await fn();
       } catch (err) {
-        showPanelExpanded(true, rootDoc);
         showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
       }
-    });
+    };
+    panel.querySelector('#ig-scraper-dl-xlsx').addEventListener('click', exportHandler(downloadExcelFile));
+    panel.querySelector('#ig-scraper-dl-csv').addEventListener('click', exportHandler(downloadCsvFile));
 
-    panel.querySelector('#ig-scraper-dl-csv').addEventListener('click', async (e) => {
-      e.stopPropagation();
-      try {
-        await downloadCsvFile();
-      } catch (err) {
-        showPanelExpanded(true, rootDoc);
-        showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
-      }
-    });
-
-    panel.querySelector('#ig-scraper-clear-btn').addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const badge = rootDoc.getElementById('ig-scraper-count-badge');
-      const count = badge ? Number(badge.textContent) || 0 : 0;
+    panel.querySelector('#ig-scraper-clear-btn').addEventListener('click', async () => {
+      const count = panelState.profiles.length;
       if (count > 0 && typeof window !== 'undefined' && typeof window.confirm === 'function' &&
         !window.confirm(`Remove all ${count} scraped profile(s) from Crow Scrapper? This cannot be undone.`)) {
         return;
@@ -2137,140 +2960,464 @@ function describeSheetSyncResult(res) {
       }
     });
 
+    // Row actions (delegated)
+    const tbody = panel.querySelector('#ig-scraper-tbody');
+    tbody.addEventListener('click', (e) => {
+      const target = e.target && typeof e.target.closest === 'function' ? e.target.closest('[data-action]') : null;
+      if (!target) return;
+      const username = target.getAttribute('data-username') || '';
+      const action = target.getAttribute('data-action');
+      if (action === 'edit' || action === 'check') {
+        openProfileEditor(username, rootDoc);
+      } else if (action === 'rescrape') {
+        requestFreshRescrape(username, rootDoc);
+      } else if (action === 'delete') {
+        removeProfileRecord(username)
+          .then((updated) => renderInPagePanelList(updated, rootDoc))
+          .catch((err) => showPanelStatus((err && err.message) || String(err), 'error', rootDoc));
+      }
+    });
+    // Defer re-renders while the user is typing in a Price / ID cell (keeps focus & caret).
+    tbody.addEventListener('focusout', () => {
+      setTimeout(() => {
+        if (panelState.deferredList && !isEditingPanelCell(rootDoc)) {
+          const list = panelState.deferredList;
+          panelState.deferredList = null;
+          renderInPagePanelList(list, rootDoc);
+        }
+      }, 0);
+    });
+
+    if (typeof window !== 'undefined' && !window.__crowPanelResizeBound) {
+      window.__crowPanelResizeBound = true;
+      window.addEventListener('resize', () => applyLauncherPosition(document));
+    }
+
+    applyLauncherPosition(rootDoc);
+    loadPanelPrefs().then((prefs) => {
+      panelState.sort = prefs.sort || 'recent';
+      sortSel.value = panelState.sort;
+      applyLauncherPosition(rootDoc);
+      if (!panelState.expandedTouched && !keepExpanded) {
+        showPanelExpanded(Boolean(prefs.expanded), rootDoc, { fromPrefs: true });
+      }
+      renderPanelRows(rootDoc);
+    });
+
     getStoredProfiles()
       .then((list) => renderInPagePanelList(list, rootDoc))
       .catch((err) => showPanelStatus((err && err.message) || String(err), 'error', rootDoc));
     return panel;
   }
 
+  function isEditingPanelCell(rootDoc = document) {
+    const active = rootDoc.activeElement;
+    return Boolean(
+      active &&
+      active.tagName === 'INPUT' &&
+      active.closest &&
+      active.closest('#ig-scraper-tbody')
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // Rendering
+  // --------------------------------------------------------------------------
+
   async function renderInPagePanelList(profiles, rootDoc = document) {
     const list = Array.isArray(profiles) ? profiles : await getStoredProfiles();
+    if (isEditingPanelCell(rootDoc)) {
+      panelState.deferredList = list;
+      return;
+    }
+    panelState.profiles = Core.deduplicateProfiles(list);
+    renderPanelRows(rootDoc);
+  }
+
+  function renderPanelRows(rootDoc = document) {
+    const all = panelState.profiles;
+    const warnCount = all.filter((p) => qualityOf(p).level === 'warn').length;
+
     const badge = rootDoc.getElementById('ig-scraper-count-badge');
-    if (badge) badge.textContent = String(list.length);
+    if (badge) badge.textContent = String(all.length);
+    const launcherBadge = rootDoc.getElementById('crow-launcher-badge');
+    if (launcherBadge) {
+      launcherBadge.textContent = String(all.length);
+      launcherBadge.classList.toggle('crow-launcher-badge-warn', warnCount > 0);
+      launcherBadge.hidden = all.length === 0;
+    }
+    const summary = rootDoc.getElementById('crow-foot-summary');
+    if (summary) {
+      summary.textContent = all.length === 0
+        ? ''
+        : `${all.length} profile${all.length === 1 ? '' : 's'}${warnCount ? ` · ⚠ ${warnCount} to check` : ''}`;
+    }
 
     const tbody = rootDoc.getElementById('ig-scraper-tbody');
     if (!tbody) return;
 
-    if (list.length === 0) {
+    if (all.length === 0) {
       tbody.innerHTML = `
         <tr>
-          <td colspan="10" class="ig-scraper-empty-cell">
-            No profiles scraped yet. Click <strong>"Scrape Profile"</strong> next to a profile's username!
+          <td colspan="11" class="ig-scraper-empty-cell crow-empty">
+            <div class="crow-empty-title">No profiles yet</div>
+            <div class="crow-empty-text">Open any Instagram profile and press <strong>Scrape Profile</strong> next to the username.</div>
           </td>
         </tr>
       `;
       return;
     }
 
-    tbody.innerHTML = '';
-    list.forEach((item) => {
+    const rows = sortProfiles(filterProfiles(all, panelState.query), panelState.sort);
+    if (rows.length === 0) {
+      tbody.innerHTML = '';
       const tr = rootDoc.createElement('tr');
-      const username = String(item.username || '');
-      const profileUrl = item.profileUrl || `https://www.instagram.com/${encodeURIComponent(username)}/`;
-
-      // Col 1: USERNAME
-      const tdUser = rootDoc.createElement('td');
-      tdUser.className = 'cell-username';
-      const link = rootDoc.createElement('a');
-      link.href = profileUrl;
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      link.className = 'ig-scraper-user-link';
-      link.title = `Open @${username} on Instagram`;
-      link.textContent = username;
-      tdUser.appendChild(link);
-
-      // Col 2: Follower
-      const tdFollowers = rootDoc.createElement('td');
-      tdFollowers.textContent = Core.formatNumberWithCommas(item.followers);
-
-      // Col 3: ER + Follower Benchmark Badge
-      const tdEr = rootDoc.createElement('td');
-      const erVal = item.erFormatted || (Number(item.er || 0).toFixed(2) + '%');
-      const erBenchInfo = Core.getErBenchmark(item.followers, item.er);
-      const erSpan = rootDoc.createElement('span');
-      erSpan.className = 'ig-metric-val';
-      erSpan.textContent = erVal;
-      const erBadge = rootDoc.createElement('span');
-      const erBadgeClass = erBenchInfo.aboveBenchmark
-        ? 'ig-badge-er-good'
-        : Number(item.er || 0) >= erBenchInfo.benchmark * 0.5
-          ? 'ig-badge-er-low'
-          : 'ig-badge-er-bad';
-      erBadge.className = `ig-metric-badge ${erBadgeClass}`;
-      erBadge.title = `Benchmark for ${erBenchInfo.tier} followers: ${erBenchInfo.formatted}`;
-      erBadge.textContent = `${erBenchInfo.aboveBenchmark ? '≥' : '<'}${erBenchInfo.formatted}`;
-      tdEr.append(erSpan, erBadge);
-
-      // Col 4: V.R. + View Rate Band Badge
-      const tdVr = rootDoc.createElement('td');
-      const vrVal = item.vrFormatted || (Number(item.vr || 0).toFixed(2) + '%');
-      const vrBandInfo = Core.getViewRateBand(item.vr);
-      const vrSpan = rootDoc.createElement('span');
-      vrSpan.className = 'ig-metric-val';
-      vrSpan.textContent = vrVal;
-      const vrBadge = rootDoc.createElement('span');
-      vrBadge.className = `ig-metric-badge ${getVrBadgeClass(vrBandInfo.band)}`;
-      vrBadge.title = `View Rate Band: ${vrBandInfo.band} (${vrBandInfo.range})`;
-      vrBadge.textContent = vrBandInfo.band;
-      tdVr.append(vrSpan, vrBadge);
-
-      // Col 5: AV VIEW
-      const tdViews = rootDoc.createElement('td');
-      tdViews.textContent = (typeof item.avgViewsFormatted === 'string' && item.avgViewsFormatted)
-        ? item.avgViewsFormatted
-        : Core.formatCompactCount(item.avgViews);
-
-      // Col 6: AV LIKE
-      const tdLikes = rootDoc.createElement('td');
-      tdLikes.textContent = Core.formatNumberWithCommas(item.avgLikes);
-
-      // Col 7: AV COMMENTS
-      const tdComments = rootDoc.createElement('td');
-      tdComments.textContent = Core.formatNumberWithCommas(item.avgComments);
-
-      // Col 8: LIKES PER COMMENT
-      const tdLpc = rootDoc.createElement('td');
-      tdLpc.textContent = Core.formatLikesPerComment(item.likesPerComment);
-
-      // Col 9: Price/REEL (empty by default, editable)
-      const tdPrice = rootDoc.createElement('td');
-      const priceInput = rootDoc.createElement('input');
-      priceInput.type = 'text';
-      priceInput.className = 'ig-scraper-price-input';
-      priceInput.value = item.pricePerReel !== undefined && item.pricePerReel !== null ? String(item.pricePerReel) : '';
-      priceInput.placeholder = '';
-      priceInput.title = 'Optional Price/REEL (kept empty by default)';
-      priceInput.addEventListener('change', async () => {
-        try {
-          await updateProfilePrice(username, priceInput.value);
-        } catch (err) {
-          showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
-        }
-      });
-      tdPrice.appendChild(priceInput);
-
-      // Col 10: Remove button
-      const tdDel = rootDoc.createElement('td');
-      const delBtn = rootDoc.createElement('button');
-      delBtn.type = 'button';
-      delBtn.className = 'ig-scraper-row-del';
-      delBtn.setAttribute('data-username', username);
-      delBtn.title = `Remove ${username}`;
-      delBtn.textContent = '×';
-      delBtn.addEventListener('click', async () => {
-        try {
-          const updated = await removeProfileRecord(username);
-          await renderInPagePanelList(updated, rootDoc);
-        } catch (err) {
-          showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
-        }
-      });
-      tdDel.appendChild(delBtn);
-
-      tr.append(tdUser, tdFollowers, tdEr, tdVr, tdViews, tdLikes, tdComments, tdLpc, tdPrice, tdDel);
+      const td = rootDoc.createElement('td');
+      td.colSpan = 11;
+      td.className = 'ig-scraper-empty-cell crow-empty';
+      td.textContent = `No profile matches “${panelState.query}”.`;
+      tr.appendChild(td);
       tbody.appendChild(tr);
+      return;
+    }
+
+    tbody.innerHTML = '';
+    let highlightRow = null;
+    for (const item of rows) {
+      const tr = buildPanelRow(item, rootDoc);
+      if (panelState.highlight && sameUsername(item.username, panelState.highlight)) {
+        tr.classList.add('crow-row-new');
+        highlightRow = tr;
+      }
+      tbody.appendChild(tr);
+    }
+    if (highlightRow && typeof highlightRow.scrollIntoView === 'function') {
+      try {
+        highlightRow.scrollIntoView({ block: 'nearest' });
+      } catch (_err) {
+        // ignore
+      }
+    }
+  }
+
+  function makeCell(rootDoc, className, text) {
+    const td = rootDoc.createElement('td');
+    if (className) td.className = className;
+    if (text !== undefined) td.textContent = text;
+    return td;
+  }
+
+  function makeMetricCell(rootDoc, value, badgeText, badgeClass, badgeTitle) {
+    const td = makeCell(rootDoc, 'col-num');
+    const wrap = rootDoc.createElement('div');
+    wrap.className = 'crow-metric';
+    const val = rootDoc.createElement('span');
+    val.className = 'ig-metric-val';
+    val.textContent = value;
+    const badge = rootDoc.createElement('span');
+    badge.className = `ig-metric-badge crow-pill ${badgeClass}`;
+    badge.textContent = badgeText;
+    if (badgeTitle) badge.title = badgeTitle;
+    wrap.append(val, badge);
+    td.appendChild(wrap);
+    return td;
+  }
+
+  function makeIconButton(rootDoc, action, username, label, svgPath, extraClass) {
+    const btn = rootDoc.createElement('button');
+    btn.type = 'button';
+    btn.className = `crow-row-btn ${extraClass || ''}`.trim();
+    btn.setAttribute('data-action', action);
+    btn.setAttribute('data-username', username);
+    btn.setAttribute('aria-label', label);
+    btn.title = label;
+    btn.innerHTML = `<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">${svgPath}</svg>`;
+    return btn;
+  }
+
+  function bindSavingInput(input, username, field, rootDoc) {
+    let timer = 0;
+    const save = async () => {
+      clearTimeout(timer);
+      try {
+        const list = await updateProfileField(username, field, input.value);
+        // Keep the in-memory list current (search / sort read it) without re-rendering the row
+        // the user is typing in.
+        if (Array.isArray(list)) panelState.profiles = Core.deduplicateProfiles(list);
+      } catch (err) {
+        showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
+      }
+    };
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(save, 450);
     });
+    input.addEventListener('change', save);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') input.blur();
+    });
+  }
+
+  function buildPanelRow(item, rootDoc = document) {
+    const tr = rootDoc.createElement('tr');
+    const username = String(item.username || '');
+    const profileUrl = item.profileUrl || `https://www.instagram.com/${encodeURIComponent(username)}/`;
+    const quality = qualityOf(item);
+    if (quality.level === 'warn') tr.classList.add('crow-row-warn');
+
+    // Col 1: USERNAME (+ avatar, meta, flags)
+    const tdUser = makeCell(rootDoc, 'cell-username');
+    const userWrap = rootDoc.createElement('div');
+    userWrap.className = 'crow-user';
+    const avatar = rootDoc.createElement('span');
+    avatar.className = 'crow-avatar';
+    avatar.style.background = avatarStyleFor(username);
+    avatar.textContent = (username.replace(/^[^a-zA-Z0-9]+/, '').charAt(0) || '?').toUpperCase();
+    const userText = rootDoc.createElement('div');
+    userText.className = 'crow-user-text';
+    const link = rootDoc.createElement('a');
+    link.href = profileUrl;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.className = 'ig-scraper-user-link';
+    link.title = `Open @${username} on Instagram`;
+    link.textContent = username;
+    const meta = rootDoc.createElement('div');
+    meta.className = 'crow-user-meta';
+    const metaParts = [];
+    if (Number(item.postsAnalyzed) > 0) metaParts.push(`${item.postsAnalyzed} reel${Number(item.postsAnalyzed) === 1 ? '' : 's'}`);
+    const src = sourceLabel(item.dataSource);
+    if (src) metaParts.push(src);
+    const ago = timeAgo(item.editedAt || item.scrapedAt);
+    if (ago) metaParts.push(ago);
+    const metaText = rootDoc.createElement('span');
+    metaText.textContent = metaParts.join(' · ');
+    meta.appendChild(metaText);
+    if (item.manuallyEdited) {
+      const edited = rootDoc.createElement('span');
+      edited.className = 'crow-flag crow-flag-edited';
+      edited.textContent = '✎ edited';
+      edited.title = 'You corrected this row by hand';
+      meta.appendChild(edited);
+    }
+    if (quality.level === 'warn') {
+      const warnBtn = rootDoc.createElement('button');
+      warnBtn.type = 'button';
+      warnBtn.className = 'crow-flag crow-flag-warn';
+      warnBtn.setAttribute('data-action', 'check');
+      warnBtn.setAttribute('data-username', username);
+      warnBtn.textContent = '⚠ check';
+      warnBtn.title = `${quality.issues.join('\n')}\n\nClick to review & fix.`;
+      meta.appendChild(warnBtn);
+    }
+    userText.append(link, meta);
+    userWrap.append(avatar, userText);
+    tdUser.appendChild(userWrap);
+
+    // Col 2: Follower
+    const tdFollowers = makeCell(rootDoc, 'col-num', Core.formatNumberWithCommas(item.followers));
+
+    // Col 3: ER + benchmark
+    const erBenchInfo = Core.getErBenchmark(item.followers, item.er);
+    const erBadgeClass = erBenchInfo.aboveBenchmark
+      ? 'crow-badge-good'
+      : Number(item.er || 0) >= erBenchInfo.benchmark * 0.5
+        ? 'crow-badge-low'
+        : 'crow-badge-bad';
+    const tdEr = makeMetricCell(
+      rootDoc,
+      item.erFormatted || (Number(item.er || 0).toFixed(2) + '%'),
+      `${erBenchInfo.aboveBenchmark ? '≥' : '<'}${erBenchInfo.formatted}`,
+      erBadgeClass,
+      `Benchmark for ${erBenchInfo.tier} followers: ${erBenchInfo.formatted}`
+    );
+
+    // Col 4: V.R. + band
+    const vrBandInfo = Core.getViewRateBand(item.vr);
+    const tdVr = makeMetricCell(
+      rootDoc,
+      item.vrFormatted || (Number(item.vr || 0).toFixed(2) + '%'),
+      vrBandInfo.band,
+      getVrBadgeClass(vrBandInfo.band),
+      `View Rate band: ${vrBandInfo.band} (${vrBandInfo.range})`
+    );
+
+    // Col 5-8
+    const tdViews = makeCell(
+      rootDoc,
+      'col-num',
+      (typeof item.avgViewsFormatted === 'string' && item.avgViewsFormatted)
+        ? item.avgViewsFormatted
+        : Core.formatCompactCount(item.avgViews)
+    );
+    const tdLikes = makeCell(rootDoc, 'col-num', Core.formatNumberWithCommas(item.avgLikes));
+    const tdComments = makeCell(rootDoc, 'col-num', Core.formatNumberWithCommas(item.avgComments));
+    const tdLpc = makeCell(rootDoc, 'col-num', Core.formatLikesPerComment(item.likesPerComment));
+
+    // Col 9: Price/REEL
+    const tdPrice = makeCell(rootDoc, 'col-price');
+    const priceInput = rootDoc.createElement('input');
+    priceInput.type = 'text';
+    priceInput.className = 'ig-scraper-price-input crow-cell-input';
+    priceInput.value = item.pricePerReel !== undefined && item.pricePerReel !== null ? String(item.pricePerReel) : '';
+    priceInput.placeholder = '—';
+    priceInput.title = 'Price/REEL';
+    priceInput.setAttribute('aria-label', `Price per reel for ${username}`);
+    bindSavingInput(priceInput, username, 'pricePerReel', rootDoc);
+    tdPrice.appendChild(priceInput);
+
+    // Col 10: ID/Phone
+    const tdContact = makeCell(rootDoc, 'col-contact');
+    const contactInput = rootDoc.createElement('input');
+    contactInput.type = 'text';
+    contactInput.className = 'crow-contact-input crow-cell-input';
+    contactInput.value = item.contactInfo !== undefined && item.contactInfo !== null ? String(item.contactInfo) : '';
+    contactInput.placeholder = 'Add ID / phone';
+    contactInput.title = 'ID / Phone number';
+    contactInput.setAttribute('aria-label', `ID or phone number for ${username}`);
+    bindSavingInput(contactInput, username, 'contactInfo', rootDoc);
+    tdContact.appendChild(contactInput);
+
+    // Col 11: actions
+    const tdActions = makeCell(rootDoc, 'col-actions');
+    const actions = rootDoc.createElement('div');
+    actions.className = 'crow-row-actions';
+    actions.append(
+      makeIconButton(
+        rootDoc,
+        'edit',
+        username,
+        `Edit @${username} (fix wrong numbers)`,
+        '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4Z"/>'
+      ),
+      makeIconButton(
+        rootDoc,
+        'rescrape',
+        username,
+        `Re-scrape @${username} fresh (reloads the profile)`,
+        '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>'
+      ),
+      makeIconButton(
+        rootDoc,
+        'delete',
+        username,
+        `Remove @${username}`,
+        '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6 6l12 12M18 6 6 18"/>',
+        'ig-scraper-row-del crow-row-btn-danger'
+      )
+    );
+    tdActions.appendChild(actions);
+
+    tr.append(tdUser, tdFollowers, tdEr, tdVr, tdViews, tdLikes, tdComments, tdLpc, tdPrice, tdContact, tdActions);
+    return tr;
+  }
+
+  // --------------------------------------------------------------------------
+  // Edit & fresh re-scrape
+  // --------------------------------------------------------------------------
+
+  async function openProfileEditor(username, rootDoc = document) {
+    const Editor = typeof window !== 'undefined' ? window.CrowEditor : null;
+    if (!Editor || typeof Editor.open !== 'function') {
+      showPanelStatus('The editor failed to load — refresh the tab.', 'error', rootDoc);
+      return;
+    }
+    let list;
+    try {
+      list = await getStoredProfiles();
+    } catch (err) {
+      showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
+      return;
+    }
+    const key = Core.normalizeUsernameKey(username);
+    const profile = list.find((p) => Core.normalizeUsernameKey(p.username) === key);
+    if (!profile) return;
+    Editor.open({
+      doc: rootDoc,
+      Core,
+      profile,
+      onSave: async (record) => {
+        const updated = await replaceProfileRecord(record);
+        panelState.highlight = record.username;
+        await renderInPagePanelList(updated, rootDoc);
+        showToast(`Saved @${record.username} — ER ${record.erFormatted} · V.R. ${record.vrFormatted}`, 'success', rootDoc);
+      },
+      onRescrape: (p) => requestFreshRescrape(p.username, rootDoc),
+      onDelete: async (p) => {
+        const updated = await removeProfileRecord(p.username);
+        await renderInPagePanelList(updated, rootDoc);
+      }
+    });
+  }
+
+  /**
+   * Fully reloads the profile (fresh DOM, fresh embedded data, no-store API calls) and scrapes it
+   * again automatically, replacing the stored row. A plain re-click on the same page could reuse
+   * stale page data and give the same wrong result.
+   */
+  async function requestFreshRescrape(username, rootDoc = document) {
+    const clean = String(username || '').trim().replace(/^@+/, '');
+    if (!/^[A-Za-z0-9._]{1,30}$/.test(clean)) return;
+    try {
+      await setPendingRescrape({ username: clean.toLowerCase(), at: Date.now() });
+    } catch (err) {
+      showPanelStatus((err && err.message) || String(err), 'error', rootDoc);
+      return;
+    }
+    showToast(`Reloading @${clean} to scrape it fresh…`, 'info', rootDoc);
+    setTimeout(() => {
+      window.location.assign(`https://www.instagram.com/${clean}/`);
+    }, 150);
+  }
+
+  let pendingRescrapeRunning = false;
+  async function runPendingRescrapeIfAny(rootDoc = document) {
+    // Only guards against two runs at the same time; a later call (e.g. after the request was
+    // stored) must still be able to pick it up.
+    if (pendingRescrapeRunning) return;
+    pendingRescrapeRunning = true;
+    try {
+      await runPendingRescrapeUnguarded(rootDoc);
+    } finally {
+      pendingRescrapeRunning = false;
+    }
+  }
+
+  async function runPendingRescrapeUnguarded(rootDoc) {
+    let pending = null;
+    try {
+      pending = await getPendingRescrape();
+    } catch (_err) {
+      return;
+    }
+    if (!pending || !pending.username) return;
+    if (!Number.isFinite(pending.at) || Date.now() - pending.at > 3 * 60 * 1000) {
+      await clearPendingRescrape();
+      return;
+    }
+
+    const startedAt = Date.now();
+    const deadline = startedAt + 20000;
+    while (Date.now() < deadline) {
+      const current = detectCurrentProfileUsername(rootDoc);
+      if (current && !sameUsername(current, pending.username)) {
+        // The user went somewhere else — drop the request.
+        await clearPendingRescrape();
+        return;
+      }
+      const btn = ensureProfileScrapeButton(rootDoc);
+      const gridReady = rootDoc.querySelector('main a[href*="/p/"], main a[href*="/reel/"]');
+      if (btn && sameUsername(btn.getAttribute('data-username'), pending.username) &&
+        (gridReady || Date.now() - startedAt > 8000)) {
+        await clearPendingRescrape();
+        await new Promise((r) => setTimeout(r, 700)); // let the grid settle
+        await handleScrapeButtonClick(btn, rootDoc);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    await clearPendingRescrape();
+    showToast('Could not re-scrape automatically — press “Scrape Profile”.', 'error', rootDoc);
   }
 
   // ============================================================================
@@ -2306,7 +3453,9 @@ function describeSheetSyncResult(res) {
             assertScrapeHasPosts(metrics, username);
             const list = await upsertProfileRecord(metrics);
             ensureInPagePanel(document);
+            markHighlight(metrics.username);
             await renderInPagePanelList(list, document);
+            reportScrapeQuality(metrics, document);
             const btn = document.getElementById('ig-scraper-profile-btn');
             if (btn && sameUsername(btn.getAttribute('data-username'), username)) {
               btn.disabled = false;
@@ -2405,11 +3554,18 @@ function describeSheetSyncResult(res) {
     });
   }
 
+  function bootContentScript() {
+    initContentScript();
+    if (isExtensionContextAlive() && isCurrentInstance()) {
+      runPendingRescrapeIfAny(document).catch(() => {});
+    }
+  }
+
   if (typeof document !== 'undefined') {
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', initContentScript);
+      document.addEventListener('DOMContentLoaded', bootContentScript);
     } else {
-      initContentScript();
+      bootContentScript();
     }
   }
 
@@ -2419,6 +3575,10 @@ function describeSheetSyncResult(res) {
     isDomPostElementPinned,
     detectDomPostReelStatus,
     extractCountsFromDomPostTile,
+    readTileNumbers,
+    resolveTileCountsFromHover,
+    populateDomPostCountsViaHover,
+    readViewBadges,
     scanDomGridPosts,
     extractFollowersFromDom,
     extractDataFromEmbeddedScripts,
@@ -2437,6 +3597,16 @@ function describeSheetSyncResult(res) {
     getGoogleSheetConfig,
     upsertProfileRecord,
     updateProfilePrice,
+    updateProfileField,
+    replaceProfileRecord,
+    removeProfileRecord,
+    showPanelExpanded,
+    computeCardGeometry,
+    setPanelSize,
+    resetPanelSize,
+    openProfileEditor,
+    requestFreshRescrape,
+    runPendingRescrapeIfAny,
     syncProfilesWithGoogleSheet
   };
 

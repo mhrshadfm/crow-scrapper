@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Crow Scrapper",
   "author": "@mhrshadfm",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Crow Scrapper by @mhrshadfm — Scrapes Instagram profile followers, Reels View Rate (V.R.) & Engagement Rate (ER) from 6 recent non-pinned Reels with Excel (.xlsx), CSV, and Shared Google Sheet sync.",
   "permissions": [
     "storage",
@@ -41,10 +41,12 @@
         "https://instagram.com/*"
       ],
       "css": [
-        "src/content.css"
+        "src/content.css",
+        "src/editor.css"
       ],
       "js": [
         "src/core.js",
+        "src/editor.js",
         "src/content.js"
       ],
       "run_at": "document_idle"

@@ -31,6 +31,9 @@ When you open any Instagram profile (`https://www.instagram.com/<username>/`), *
 ## Key Features
 
 - **In-Header 1-Click Scrape Button** — Appears right next to the username on any Instagram profile page (`https://www.instagram.com/<username>/`).
+- **Compact Top Panel (v1.2)** — The in-page list lives behind a small **crow icon at the top of the screen** (drag it anywhere — the position is remembered). Click it to open the list right under the icon; minimize (or press `Esc`) and it shrinks back to just the icon. **Resize the list window** by dragging its edge or corner grip (double-click an edge to reset); the size is remembered. Includes search, sorting and a count badge that turns orange when a row needs a check.
+- **Fix Wrong Scrapes (v1.2)** — Every row has **✎ Edit** (correct followers, averages, or each of the 6 reels used — ER / V.R. recalculate live) and **↻ Re-scrape fresh** (reloads the profile and scrapes it again with no cached data). Rows that look mis-scraped (likes above views, views equal to comments, absurd V.R., too few reels, page-tile fallback) are marked **⚠ check**.
+- **ID / Phone Column (v1.2)** — Store each creator's contact (ID, phone or email) next to **Price/REEL**; it is exported to Excel, CSV and your Google Sheet, and phone numbers stay as text (`+98…` is never turned into a formula).
 - **6 Recent Non-Pinned Reels Only** — Automatically detects and excludes up to 3 pinned posts/Reels (via API metadata, DOM pin badges, and timestamp-inversion detection) so old pinned posts never distort current performance. Includes an optional **"Skip most recent post/reel"** toggle to exclude newly published posts that haven't matured yet.
 - **Written `K` / `M` Reel View Scraping** — Scrapes the written view count (`1.5M`, `450K`, `85K`) directly from the profile's Reels, counting `M` as Millions (`× 1,000,000`) and `K` as Thousands (`× 1,000`), and enters `AV VIEW` in clean `K` / `M` notation.
 - **View Rate (`V.R.`) & 5 Performance Bands** — Calculates `V.R. = (AV VIEW / Follower) × 100%` and classifies each profile into **Very low**, **Low**, **Medium**, **High**, or **Very high**.
@@ -41,9 +44,9 @@ When you open any Instagram profile (`https://www.instagram.com/<username>/`), *
 
 ---
 
-## 9-Column Output Layout
+## 10-Column Output Layout
 
-Every scraped profile is stored and exported using the following 9-column structure:
+Every scraped profile is stored and exported using the following 10-column structure:
 
 | # | Column Name | Header Color | Format / Formula | Description |
 | :-: | :--- | :--- | :--- | :--- |
@@ -55,7 +58,8 @@ Every scraped profile is stored and exported using the following 9-column struct
 | **6** | **`AV LIKE`** | Orange (`#F4B084`) | `#,##0` | Average likes across 6 recent non-pinned Reels |
 | **7** | **`AV COMMENTS`** | Orange (`#F4B084`) | `#,##0` | Average comments across 6 recent non-pinned Reels |
 | **8** | **`LIKES PER COMMENT`** | Orange (`#F4B084`) | `0.0` | `AV LIKE / AV COMMENTS` rounded to 1 decimal place |
-| **9** | **`Price/REEL`** | Orange (`#F4B084`) | Editable / Empty (`""`) | Placed at the end of the row and kept empty by default for your pricing notes |
+| **9** | **`Price/REEL`** | Orange (`#F4B084`) | Editable / Empty (`""`) | Kept empty by default for your pricing notes |
+| **10** | **`ID/Phone`** | Orange (`#F4B084`) | Editable text / Empty (`""`) | Creator's contact — ID, phone number or email (stored as text) |
 
 ---
 
@@ -88,7 +92,7 @@ Every scraped profile is stored and exported using the following 9-column struct
 ## Installation
 
 1. **Download the Release ZIP or Clone this Repository:**
-   - **Option A (Easiest):** Download **`Crow-Scrapper-v1.1.0.zip`** from the [Releases](https://github.com/mhrshadfm/crow-scrapper/releases) section and extract the folder.
+   - **Option A (Easiest):** Download **`Crow-Scrapper-v1.2.0.zip`** from the [Releases](https://github.com/mhrshadfm/crow-scrapper/releases) section and extract the folder.
    - **Option B (Git Clone):**
      ```bash
      git clone https://github.com/mhrshadfm/crow-scrapper.git
@@ -107,7 +111,7 @@ Every scraped profile is stored and exported using the following 9-column struct
 
 **Crow Scrapper** can sync your scraped list directly into a **Shared Google Sheet** while guaranteeing **zero duplicate rows**:
 
-1. Click the **Crow Scrapper** icon in your Chrome toolbar (or open the bottom-right panel on Instagram) and expand **☁️ Shared Google Sheet Connection & Auto-Deduplication**.
+1. Click the **Crow Scrapper** icon in your Chrome toolbar (or open the crow icon at the top of Instagram) and expand **☁️ Shared Google Sheet Connection & Auto-Deduplication**.
 2. Paste your **Shared Google Sheet URL** (`https://docs.google.com/spreadsheets/d/.../edit`).
 3. Click **📋 Copy Google Sheet Script**.
 4. In your Google Sheet, open **Extensions → Apps Script**, replace any code in `Code.gs` with the copied script, and click **Save**.
@@ -120,7 +124,9 @@ Every scraped profile is stored and exported using the following 9-column struct
 
 > **Updating from v1.0.0?** Click **📋 Copy Google Sheet Script** again, paste it over the old code, and redeploy (**Deploy → Manage deployments → Edit → New version**). The v1.1.0 script only accepts requests that carry your extension's private sync token and always writes to *your* sheet, so knowing the Web App URL alone is no longer enough to modify it.
 
-> **Smart Deduplication:** Whenever you sync or re-scrape a profile that already exists in your Google Sheet, Crow Scrapper updates that creator's row in place and preserves any `Price/REEL` value you already entered in Column I.
+> **Updating to v1.2.0?** Copy the script and redeploy once more so the sheet gets the new **ID/Phone** column (J).
+
+> **Smart Deduplication:** Whenever you sync or re-scrape a profile that already exists in your Google Sheet, Crow Scrapper updates that creator's row in place and preserves any `Price/REEL` (Column I) and `ID/Phone` (Column J) value you already entered.
 
 ---
 
@@ -141,8 +147,10 @@ Every scraped profile is stored and exported using the following 9-column struct
 │   └── icon128.png          # Chrome Web Store / High-DPI icon (128x128)
 ├── src/
 │   ├── core.js              # Metrics engine, K/M parser, OpenXML .xlsx generator, Google Sheets sync planner
-│   ├── content.js           # Instagram profile button, Reels scraper, & floating in-page table panel
-│   ├── content.css          # Styles for the in-header button & floating panel
+│   ├── content.js           # Instagram profile button, Reels scraper, & top launcher + in-page list panel
+│   ├── content.css          # Styles for the in-header button, launcher icon & panel
+│   ├── editor.js            # Shared "Edit profile" dialog (panel + popup): fix numbers, per-reel edits
+│   ├── editor.css           # Styles for the edit dialog & shared metric badges
 │   ├── popup.html           # Extension toolbar popup UI
 │   ├── popup.js             # Popup controller, exports, & Google Sheet settings
 │   ├── popup.css            # Styles for the extension popup
@@ -150,7 +158,11 @@ Every scraped profile is stored and exported using the following 9-column struct
 ├── tests/
 │   ├── scraper.test.js      # Unit & Apps Script VM test suite
 │   ├── xlsx-and-dom.test.js # OpenXML .xlsx ZIP/CRC32/XML schema & hyperlink verifier
-│   └── browser-e2e.test.js  # Headless Chrome E2E tests for content script & popup UI
+│   ├── browser-e2e.test.js  # Headless Chrome E2E tests for content script & popup UI
+│   ├── panel-ui-e2e.test.js # Headless Chrome test for the top panel, ID/Phone & edit dialog
+│   ├── tile-reading-e2e.test.js # Headless Chrome test for reading reel tiles when the API is unavailable
+│   ├── v1.1-regressions.test.js
+│   └── v1.2-features.test.js
 ├── manifest.json            # Chrome Extension Manifest V3 configuration
 ├── LICENSE                  # MIT License
 └── README.md                # Documentation
@@ -165,6 +177,9 @@ node tests/scraper.test.js
 node tests/xlsx-and-dom.test.js
 node tests/browser-e2e.test.js
 node tests/v1.1-regressions.test.js
+node tests/v1.2-features.test.js
+node tests/panel-ui-e2e.test.js
+node tests/tile-reading-e2e.test.js
 ```
 
 ---

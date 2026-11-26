@@ -31,8 +31,16 @@
     'AV LIKE',
     'AV COMMENTS',
     'LIKES PER COMMENT',
-    'Price/REEL'
+    'Price/REEL',
+    'ID/Phone'
   ];
+
+  /** Plausibility limits used to flag rows that are probably mis-scraped. */
+  const QUALITY_LIMITS = {
+    maxPlausibleVr: 1500, // % — far beyond any normal account; usually wrong reels/views
+    maxPlausibleEr: 60, // %
+    minPostsForConfidence: 3
+  };
 
   /**
    * Parses human-formatted or raw counts from Instagram (e.g., "373,760", "71.9K", "1.2M", "1,5M", "120Kviews", "\u20661.5M\u2069", 878).
@@ -625,37 +633,113 @@
     });
     const count = recentPosts.length;
 
-    let totalViews = 0;
-    let totalLikes = 0;
-    let totalComments = 0;
-    let avgViews = 0;
-    let avgLikes = 0;
-    let avgComments = 0;
+    // Keep the exact reels that were averaged so a wrong row can be inspected and fixed per reel.
+    const reels = recentPosts.map((post) => {
+      const views = Math.max(0, Math.round(Number(post.views) || 0));
+      const likes = Math.max(0, Math.round(Number(post.likes) || 0));
+      const comments = Math.max(0, Math.round(Number(post.comments) || 0));
+      // A Reel can't have more likes than plays: a "views" value below the likes is a misread
+      // tile number (often the comment count) and must not be averaged in as views.
+      const viewsSuspect = Boolean(post.isReel && views > 0 && likes > views);
+      return {
+        shortcode: String(post.shortcode || ''),
+        url: buildPostUrl(post.shortcode, post.isReel),
+        views: viewsSuspect ? 0 : views,
+        likes,
+        comments,
+        isReel: Boolean(post.isReel),
+        timestamp: Number(post.timestamp) || 0,
+        viewsSuspect,
+        excluded: false
+      };
+    });
 
-    if (count > 0) {
-      totalViews = recentPosts.reduce((acc, p) => acc + (p.views || 0), 0);
-      totalLikes = recentPosts.reduce((acc, p) => acc + (p.likes || 0), 0);
-      totalComments = recentPosts.reduce((acc, p) => acc + (p.comments || 0), 0);
-      // A published Reel always has at least one play, so "0 views" means the count could not be
-      // read. Averaging those in as zeros understated AV VIEW and V.R.
-      const postsWithViews = recentPosts.filter((p) => (p.views || 0) > 0).length;
-      avgViews = postsWithViews > 0 ? Math.round(totalViews / postsWithViews) : 0;
-      avgLikes = Math.round(totalLikes / count);
-      avgComments = Math.round(totalComments / count);
-    }
+    const totals = computeReelAverages(reels);
+    const derived = deriveRateMetrics(followers, totals.avgViews, totals.avgLikes, totals.avgComments, totals);
 
-    const avgViewsFormatted = formatCompactCount(avgViews);
+    const pricePerReel =
+      safeInput.pricePerReel !== undefined && safeInput.pricePerReel !== null
+        ? String(safeInput.pricePerReel).trim()
+        : '';
+    const contactInfo =
+      safeInput.contactInfo !== undefined && safeInput.contactInfo !== null
+        ? String(safeInput.contactInfo).trim()
+        : '';
+
+    return {
+      username: cleanUsername,
+      profileUrl: cleanUsername ? `https://www.instagram.com/${cleanUsername}/` : 'https://www.instagram.com/',
+      followers,
+      ...derived,
+      pricePerReel,
+      contactInfo,
+      postsAnalyzed: count,
+      pinnedSkipped,
+      mostRecentSkipped,
+      excludeMostRecent,
+      reels,
+      dataSource: typeof safeInput.dataSource === 'string' ? safeInput.dataSource : '',
+      apiNote: typeof safeInput.apiNote === 'string' ? safeInput.apiNote : '',
+      manuallyEdited: false,
+      editedAt: '',
+      scrapedAt: new Date().toISOString()
+    };
+  }
+
+  /**
+   * Instagram post URL for a shortcode ('' when the id isn't a real shortcode).
+   * @param {string} shortcode
+   * @param {boolean} [isReel]
+   * @returns {string}
+   */
+  function buildPostUrl(shortcode, isReel) {
+    const code = String(shortcode || '');
+    if (!/^[A-Za-z0-9_-]{5,}$/.test(code) || /^\d+$/.test(code) || /^dom_post_/i.test(code)) return '';
+    return `https://www.instagram.com/${isReel ? 'reel' : 'p'}/${code}/`;
+  }
+
+  /**
+   * Averages views / likes / comments over the reels that are not excluded. Views are averaged
+   * only over reels whose play count is known (> 0).
+   * @param {Array<{views:number, likes:number, comments:number, excluded?:boolean}>} reels
+   */
+  function computeReelAverages(reels) {
+    const used = (Array.isArray(reels) ? reels : []).filter((r) => r && !r.excluded);
+    const count = used.length;
+    const totalViews = used.reduce((acc, r) => acc + (Number(r.views) || 0), 0);
+    const totalLikes = used.reduce((acc, r) => acc + (Number(r.likes) || 0), 0);
+    const totalComments = used.reduce((acc, r) => acc + (Number(r.comments) || 0), 0);
+    const withViews = used.filter((r) => (Number(r.views) || 0) > 0).length;
+    return {
+      count,
+      totalViews,
+      totalLikes,
+      totalComments,
+      avgViews: withViews > 0 ? Math.round(totalViews / withViews) : 0,
+      avgLikes: count > 0 ? Math.round(totalLikes / count) : 0,
+      avgComments: count > 0 ? Math.round(totalComments / count) : 0
+    };
+  }
+
+  /**
+   * ER / V.R. / bands / likes-per-comment from followers and the three averages.
+   */
+  function deriveRateMetrics(followersRaw, avgViewsRaw, avgLikesRaw, avgCommentsRaw, totals) {
+    const followers = Math.max(0, Math.round(Number(followersRaw) || 0));
+    const avgViews = Math.max(0, Math.round(Number(avgViewsRaw) || 0));
+    const avgLikes = Math.max(0, Math.round(Number(avgLikesRaw) || 0));
+    const avgComments = Math.max(0, Math.round(Number(avgCommentsRaw) || 0));
 
     const erRaw = followers > 0 ? ((avgLikes + avgComments) / followers) * 100 : 0;
     const er = Number.isFinite(erRaw) ? Number(erRaw.toFixed(2)) : 0;
-    const erFormatted = er.toFixed(2) + '%';
     const erBench = getErBenchmark(followers, er);
 
     const vrRaw = followers > 0 ? (avgViews / followers) * 100 : 0;
     const vr = Number.isFinite(vrRaw) ? Number(vrRaw.toFixed(2)) : 0;
-    const vrFormatted = vr.toFixed(2) + '%';
     const vrBandInfo = getViewRateBand(vr);
 
+    const totalLikes = totals && Number(totals.totalLikes) ? Number(totals.totalLikes) : 0;
+    const totalComments = totals && Number(totals.totalComments) ? Number(totals.totalComments) : 0;
     const lpcRaw = avgComments > 0
       ? avgLikes / avgComments
       : totalComments > 0
@@ -663,37 +747,114 @@
         : 0;
     const likesPerComment = Number.isFinite(lpcRaw) ? Math.round(lpcRaw * 10) / 10 : 0;
 
-    const pricePerReel =
-      safeInput.pricePerReel !== undefined && safeInput.pricePerReel !== null
-        ? String(safeInput.pricePerReel).trim()
-        : '';
-
     return {
-      username: cleanUsername,
-      profileUrl: cleanUsername ? `https://www.instagram.com/${cleanUsername}/` : 'https://www.instagram.com/',
-      followers,
       er,
-      erFormatted,
+      erFormatted: er.toFixed(2) + '%',
       erBenchmark: erBench.benchmark,
       erBenchmarkFormatted: erBench.formatted,
       erBenchmarkTier: erBench.tier,
       erAboveBenchmark: erBench.aboveBenchmark,
       vr,
-      vrFormatted,
+      vrFormatted: vr.toFixed(2) + '%',
       vrBand: vrBandInfo.band,
       vrBandRange: vrBandInfo.range,
       avgViews,
-      avgViewsFormatted,
+      avgViewsFormatted: formatCompactCount(avgViews),
       avgLikes,
       avgComments,
-      likesPerComment,
-      pricePerReel,
-      postsAnalyzed: count,
-      pinnedSkipped,
-      mostRecentSkipped,
-      excludeMostRecent,
-      scrapedAt: new Date().toISOString()
+      likesPerComment
     };
+  }
+
+  /**
+   * Applies manual corrections to a stored profile and recomputes every derived metric.
+   * `edits` may contain followers, avgViews, avgLikes, avgComments, reels (edited copies with
+   * `excluded` flags), pricePerReel and contactInfo. Explicit averages win over reel averages.
+   * @param {object} profile
+   * @param {object} edits
+   * @returns {object}
+   */
+  function recalculateProfileMetrics(profile, edits) {
+    const base = profile && typeof profile === 'object' ? profile : {};
+    const e = edits && typeof edits === 'object' ? edits : {};
+    const num = (v, fallback) => {
+      if (v === undefined || v === null || v === '') return fallback;
+      const n = typeof v === 'number' ? v : parseCount(String(v));
+      return Number.isFinite(n) && n >= 0 ? Math.round(n) : fallback;
+    };
+
+    const reels = Array.isArray(e.reels)
+      ? e.reels.map((r) => ({
+          ...r,
+          views: num(r.views, 0),
+          likes: num(r.likes, 0),
+          comments: num(r.comments, 0),
+          excluded: Boolean(r.excluded),
+          viewsSuspect: false
+        }))
+      : Array.isArray(base.reels) ? base.reels : [];
+    const reelTotals = computeReelAverages(reels);
+    const hasReels = reels.length > 0;
+
+    const followers = num(e.followers, Number(base.followers) || 0);
+    const avgViews = num(e.avgViews, hasReels && Array.isArray(e.reels) ? reelTotals.avgViews : Number(base.avgViews) || 0);
+    const avgLikes = num(e.avgLikes, hasReels && Array.isArray(e.reels) ? reelTotals.avgLikes : Number(base.avgLikes) || 0);
+    const avgComments = num(e.avgComments, hasReels && Array.isArray(e.reels) ? reelTotals.avgComments : Number(base.avgComments) || 0);
+
+    const derived = deriveRateMetrics(followers, avgViews, avgLikes, avgComments, reelTotals);
+    const text = (v, fallback) => (v === undefined || v === null ? fallback : String(v).trim());
+
+    return {
+      ...base,
+      followers,
+      ...derived,
+      reels,
+      postsAnalyzed: hasReels ? reelTotals.count : Number(base.postsAnalyzed) || 0,
+      pricePerReel: text(e.pricePerReel, base.pricePerReel || ''),
+      contactInfo: text(e.contactInfo, base.contactInfo || ''),
+      manuallyEdited: true,
+      editedAt: new Date().toISOString()
+    };
+  }
+
+  /**
+   * Flags rows that are probably mis-scraped so they can be checked / fixed.
+   * @param {object} profile
+   * @returns {{ level: 'ok'|'warn', issues: string[] }}
+   */
+  function assessProfileQuality(profile) {
+    const p = profile && typeof profile === 'object' ? profile : {};
+    const issues = [];
+    const followers = Number(p.followers) || 0;
+    const avgViews = Number(p.avgViews) || 0;
+    const avgLikes = Number(p.avgLikes) || 0;
+    const avgComments = Number(p.avgComments) || 0;
+    const posts = Number(p.postsAnalyzed) || 0;
+
+    if (followers <= 0) issues.push('Follower count is missing.');
+    if (posts > 0 && posts < QUALITY_LIMITS.minPostsForConfidence) {
+      issues.push(`Only ${posts} reel(s) could be read.`);
+    }
+    if (avgViews > 0 && avgLikes > avgViews) issues.push('Average likes are higher than average views.');
+    if (avgViews > 0 && avgComments > 0 && avgViews === avgComments) {
+      issues.push('Average views equal average comments — views were probably misread.');
+    }
+    if (avgViews <= 0 && posts > 0) issues.push('Reel views could not be read.');
+    if ((Number(p.vr) || 0) > QUALITY_LIMITS.maxPlausibleVr) {
+      issues.push('V.R. is unusually high — check that the right reels were used.');
+    }
+    if ((Number(p.er) || 0) > QUALITY_LIMITS.maxPlausibleEr) issues.push('ER is unusually high.');
+    if (Array.isArray(p.reels) && p.reels.some((r) => r && r.viewsSuspect)) {
+      issues.push('Some reel view counts looked wrong and were ignored.');
+    }
+    if (p.dataSource === 'tiles') {
+      issues.push(
+        p.apiNote
+          ? `Numbers were read from the page tiles (less reliable): ${p.apiNote}.`
+          : 'Numbers were read from the page tiles (Instagram API unavailable) — less reliable.'
+      );
+    }
+    return { level: issues.length > 0 && !p.manuallyEdited ? 'warn' : 'ok', issues };
   }
 
   /**
@@ -734,8 +895,33 @@
     return str;
   }
 
+  const PHONE_LIKE_REGEX = /^\+?[\d\s().-]{5,}$/;
+
   /**
-   * Generates a UTF-8 CSV string matching the 9 columns:
+   * CSV cell for ID/Phone. Phone numbers ("+98 912 000 0000", "0912…") are written as a quoted
+   * text literal (="…") so spreadsheets neither treat the leading "+" as a formula nor drop
+   * leading zeros. Anything else goes through the normal formula-injection guard.
+   */
+  function escapeCsvContactCell(val) {
+    const str = String(val ?? '').trim();
+    if (str && PHONE_LIKE_REGEX.test(str)) {
+      return '"=""' + str + '"""';
+    }
+    return escapeCsvCell(str);
+  }
+
+  /**
+   * Text for an ID/Phone cell written to Google Sheets with USER_ENTERED semantics: a leading
+   * apostrophe makes Sheets store "+98 …" / "=…" / "-…" / "@…" as plain text (the apostrophe is
+   * hidden) instead of trying to evaluate it.
+   */
+  function toSheetTextValue(val) {
+    const str = String(val ?? '').trim();
+    return /^[=+\-@]/.test(str) ? "'" + str : str;
+  }
+
+  /**
+   * Generates a UTF-8 CSV string matching the 10 columns:
    * USERNAME, Follower, ER, V.R., AV VIEW, AV LIKE, AV COMMENTS, LIKES PER COMMENT, Price/REEL
    * Includes UTF-8 BOM so Microsoft Excel opens it with proper encoding.
    * @param {Array<object>} profiles
@@ -764,10 +950,14 @@
       const priceStr = item.pricePerReel !== undefined && item.pricePerReel !== null
         ? String(item.pricePerReel).trim()
         : '';
+      const contactStr = item.contactInfo !== undefined && item.contactInfo !== null
+        ? String(item.contactInfo).trim()
+        : '';
 
       rows.push(
         [username, followersStr, erStr, vrStr, avgViewsStr, avgLikesStr, avgCommentsStr, lpcStr, priceStr]
           .map(escapeCsvCell)
+          .concat(escapeCsvContactCell(contactStr))
           .join(',')
       );
     }
@@ -938,8 +1128,8 @@
 
     const headers = SHEET_COLUMNS.slice();
     // Header style IDs: 1=Blue, 2=Green, 3=Purple, 4=Orange
-    const headerStyles = [1, 2, 3, 3, 4, 4, 4, 4, 4];
-    const colLetters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'];
+    const headerStyles = [1, 2, 3, 3, 4, 4, 4, 4, 4, 4];
+    const colLetters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
 
     const sheetRowsXml = [];
 
@@ -979,6 +1169,13 @@
       const priceCellXml = priceText
         ? `<c r="I${rowNum}" t="s" s="8"><v>${getSharedStringIndex(priceText)}</v></c>`
         : `<c r="I${rowNum}" s="8"/>`;
+      const contactText = item.contactInfo !== undefined && item.contactInfo !== null
+        ? String(item.contactInfo).trim()
+        : '';
+      // Stored as text (shared string) so phone numbers keep leading zeros / "+".
+      const contactCellXml = contactText
+        ? `<c r="J${rowNum}" t="s" s="8"><v>${getSharedStringIndex(contactText)}</v></c>`
+        : `<c r="J${rowNum}" s="8"/>`;
 
       const cells = [
         // Col A: USERNAME (shared string + hyperlink style 5)
@@ -997,8 +1194,10 @@
         `<c r="G${rowNum}" s="6"><v>${Math.round(avgComments)}</v></c>`,
         // Col H: LIKES PER COMMENT (general numeric style 8)
         `<c r="H${rowNum}" s="8"><v>${lpc}</v></c>`,
-        // Col I: Price/REEL (empty cell by default at the end of the row)
-        priceCellXml
+        // Col I: Price/REEL (empty cell by default)
+        priceCellXml,
+        // Col J: ID/Phone (empty cell by default at the end of the row)
+        contactCellXml
       ];
 
       sheetRowsXml.push(`<row r="${rowNum}" ht="19" customHeight="1">${cells.join('')}</row>`);
@@ -1012,7 +1211,7 @@
     });
 
     const lastRow = Math.max(1, list.length + 1);
-    const dimensionRef = `A1:I${lastRow}`;
+    const dimensionRef = `A1:J${lastRow}`;
 
     const contentTypesXml = [
       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
@@ -1125,6 +1324,7 @@
       '    <col min="7" max="7" width="18" customWidth="1"/>',
       '    <col min="8" max="8" width="22" customWidth="1"/>',
       '    <col min="9" max="9" width="16" customWidth="1"/>',
+      '    <col min="10" max="10" width="22" customWidth="1"/>',
       '  </cols>',
       '  <sheetData>',
       '    ' + sheetRowsXml.join('\n    '),
@@ -1263,6 +1463,9 @@
       const incomingPrice = item.pricePerReel !== undefined && item.pricePerReel !== null
         ? String(item.pricePerReel).trim()
         : '';
+      const incomingContact = item.contactInfo !== undefined && item.contactInfo !== null
+        ? String(item.contactInfo).trim()
+        : '';
 
       const avgViewsFormatted = (typeof item.avgViewsFormatted === 'string' && item.avgViewsFormatted)
         ? item.avgViewsFormatted
@@ -1274,6 +1477,9 @@
         const prevPrice = prev.pricePerReel !== undefined && prev.pricePerReel !== null
           ? String(prev.pricePerReel).trim()
           : '';
+        const prevContact = prev.contactInfo !== undefined && prev.contactInfo !== null
+          ? String(prev.contactInfo).trim()
+          : '';
         const canonicalName = prev.username || cleanUsername.toLowerCase();
         result[existingIdx] = {
           ...prev,
@@ -1281,7 +1487,8 @@
           username: canonicalName,
           profileUrl: prev.profileUrl || item.profileUrl || `https://www.instagram.com/${canonicalName}/`,
           avgViewsFormatted,
-          pricePerReel: incomingPrice || prevPrice
+          pricePerReel: incomingPrice || prevPrice,
+          contactInfo: incomingContact || prevContact
         };
       } else {
         indexByKey.set(key, result.length);
@@ -1290,7 +1497,8 @@
           username: cleanUsername,
           profileUrl: item.profileUrl || `https://www.instagram.com/${cleanUsername}/`,
           avgViewsFormatted,
-          pricePerReel: incomingPrice
+          pricePerReel: incomingPrice,
+          contactInfo: incomingContact
         });
       }
     }
@@ -1339,7 +1547,7 @@
    * @param {string} [fallbackPricePerReel='']
    * @returns {Array<string|number>}
    */
-  function formatProfileForSheetRow(profile, fallbackPricePerReel = '') {
+  function formatProfileForSheetRow(profile, fallbackPricePerReel = '', fallbackContactInfo = '') {
     const item = profile && typeof profile === 'object' ? profile : {};
     const cleanUsername = extractCleanUsername(item.username || item.profileUrl);
     // Always build the link from the validated username and escape quotes, so no stored value can
@@ -1371,6 +1579,15 @@
     // value you already entered"): a value typed in the sheet wins over the extension's copy.
     const pricePerReel = existingPrice || ownPrice || '';
 
+    const ownContact = item.contactInfo !== undefined && item.contactInfo !== null
+      ? String(item.contactInfo).trim()
+      : '';
+    const existingContact = fallbackContactInfo !== undefined && fallbackContactInfo !== null
+      ? String(fallbackContactInfo).trim()
+      : '';
+    // Same rule as Price/REEL: an ID/Phone typed in the sheet wins over the extension's copy.
+    const contactInfo = toSheetTextValue(existingContact || ownContact || '');
+
     const row = [
       hyperlinkFormula,
       followers,
@@ -1380,7 +1597,8 @@
       avgLikes,
       avgComments,
       likesPerComment,
-      pricePerReel
+      pricePerReel,
+      contactInfo
     ];
 
     Object.defineProperties(row, {
@@ -1429,17 +1647,22 @@
 
       const rowIndex = i + 1; // 1-based sheet row number
       const cellPrice = r[8] !== undefined && r[8] !== null ? String(r[8]).trim() : '';
+      const cellContact = r[9] !== undefined && r[9] !== null ? String(r[9]).trim() : '';
 
       if (!existingMap.has(key)) {
         existingMap.set(key, {
           rowIndex,
-          existingPricePerReel: cellPrice
+          existingPricePerReel: cellPrice,
+          existingContactInfo: cellContact
         });
       } else {
         duplicateSheetRowIndices.push(rowIndex);
         const prevEntry = existingMap.get(key);
         if (!prevEntry.existingPricePerReel && cellPrice) {
           prevEntry.existingPricePerReel = cellPrice;
+        }
+        if (!prevEntry.existingContactInfo && cellContact) {
+          prevEntry.existingContactInfo = cellContact;
         }
       }
     }
@@ -1453,10 +1676,14 @@
 
       if (existingMap.has(key)) {
         const existing = existingMap.get(key);
-        const rowValues = formatProfileForSheetRow(profile, existing.existingPricePerReel);
+        const rowValues = formatProfileForSheetRow(
+          profile,
+          existing.existingPricePerReel,
+          existing.existingContactInfo
+        );
         updates.push({
           rowIndex: existing.rowIndex,
-          range: `A${existing.rowIndex}:I${existing.rowIndex}`,
+          range: `A${existing.rowIndex}:J${existing.rowIndex}`,
           username: profile.username,
           values: rowValues,
           row: rowValues
@@ -1498,7 +1725,8 @@
       '// Shared secret: only requests carrying this token may write to your sheet.',
       `const SYNC_TOKEN = '${escapedToken}';`,
       "const USERNAME_RE = /^[A-Za-z0-9._]{1,30}$/;",
-      "const HEADERS = ['USERNAME', 'Follower', 'ER', 'V.R.', 'AV VIEW', 'AV LIKE', 'AV COMMENTS', 'LIKES PER COMMENT', 'Price/REEL'];",
+      "const HEADERS = ['USERNAME', 'Follower', 'ER', 'V.R.', 'AV VIEW', 'AV LIKE', 'AV COMMENTS', 'LIKES PER COMMENT', 'Price/REEL', 'ID/Phone'];",
+      'const NUM_COLS = HEADERS.length;',
       '',
       'function normalizeKey(val) {',
       "  if (!val) return '';",
@@ -1542,13 +1770,13 @@
       '      throw new Error("Row 1 of the target sheet is not a Crow Scrapper header (A1 must be USERNAME). Use an empty sheet/tab.");',
       '    }',
       '  }',
-      '  var headerRange = sheet.getRange(1, 1, 1, 9);',
+      '  var headerRange = sheet.getRange(1, 1, 1, NUM_COLS);',
       '  headerRange.setValues([HEADERS]);',
       "  headerRange.setFontWeight('bold').setHorizontalAlignment('center');",
       "  sheet.getRange(1, 1).setBackground('#78C8F0');",
       "  sheet.getRange(1, 2).setBackground('#92D050');",
       "  sheet.getRange(1, 3, 1, 2).setBackground('#D878D8');",
-      "  sheet.getRange(1, 5, 1, 5).setBackground('#F4B084');",
+      "  sheet.getRange(1, 5, 1, NUM_COLS - 4).setBackground('#F4B084');",
       '}',
       '',
       'function doPost(e) {',
@@ -1572,23 +1800,27 @@
       '    var lastRow = sheet.getLastRow();',
       '    var existingMap = {};',
       '    var mergedPrices = {};',
+      '    var mergedContacts = {};',
       '    var duplicateRows = [];',
       '    if (lastRow >= 2) {',
       '      var formulas = sheet.getRange(2, 1, lastRow - 1, 1).getFormulas();',
-      '      var values = sheet.getRange(2, 1, lastRow - 1, 9).getValues();',
+      '      var values = sheet.getRange(2, 1, lastRow - 1, NUM_COLS).getValues();',
       '      for (var i = 0; i < values.length; i++) {',
       '        var rawUser = formulas[i][0] || values[i][0];',
       '        var key = normalizeKey(rawUser);',
       '        if (!key || key === "username") continue;',
       '        var rowNum = i + 2;',
       '        var existingPrice = values[i][8] !== undefined && values[i][8] !== null ? String(values[i][8]).trim() : "";',
+      '        var existingContact = values[i][9] !== undefined && values[i][9] !== null ? String(values[i][9]).trim() : "";',
       '        if (!existingMap[key]) {',
-      '          existingMap[key] = { rowIndex: rowNum, pricePerReel: existingPrice };',
+      '          existingMap[key] = { rowIndex: rowNum, pricePerReel: existingPrice, contactInfo: existingContact };',
       '        } else {',
       '          duplicateRows.push(rowNum);',
       '          if (!existingMap[key].pricePerReel && existingPrice) existingMap[key].pricePerReel = existingPrice;',
+      '          if (!existingMap[key].contactInfo && existingContact) existingMap[key].contactInfo = existingContact;',
       '        }',
       '        mergedPrices[key] = existingMap[key].pricePerReel;',
+      '        mergedContacts[key] = existingMap[key].contactInfo;',
       '      }',
       '    }',
       '',
@@ -1603,12 +1835,13 @@
       '      lastRow = sheet.getLastRow();',
       '      if (lastRow >= 2) {',
       '        var f2 = sheet.getRange(2, 1, lastRow - 1, 1).getFormulas();',
-      '        var v2 = sheet.getRange(2, 1, lastRow - 1, 9).getValues();',
+      '        var v2 = sheet.getRange(2, 1, lastRow - 1, NUM_COLS).getValues();',
       '        for (var j = 0; j < v2.length; j++) {',
       '          var k2 = normalizeKey(f2[j][0] || v2[j][0]);',
       '          if (k2 && !existingMap[k2]) {',
       '            var cell = v2[j][8] !== undefined && v2[j][8] !== null ? String(v2[j][8]).trim() : "";',
-      '            existingMap[k2] = { rowIndex: j + 2, pricePerReel: mergedPrices[k2] || cell };',
+      '            var cellContact = v2[j][9] !== undefined && v2[j][9] !== null ? String(v2[j][9]).trim() : "";',
+      '            existingMap[k2] = { rowIndex: j + 2, pricePerReel: mergedPrices[k2] || cell, contactInfo: mergedContacts[k2] || cellContact };',
       '          }',
       '        }',
       '      }',
@@ -1631,6 +1864,10 @@
       '      var prevPrice = existingMap[uKey] ? existingMap[uKey].pricePerReel : "";',
       '      // A price typed in the sheet wins; otherwise use the one from the extension.',
       '      var price = String(prevPrice || item.pricePerReel || "").trim();',
+      '      var prevContact = existingMap[uKey] ? existingMap[uKey].contactInfo : "";',
+      '      var contact = String(prevContact || item.contactInfo || "").trim();',
+      '      // Leading apostrophe = store as text, so "+98 912 …" is not evaluated as a formula.',
+      '      if (/^[=+\\-@]/.test(contact)) contact = "\'" + contact;',
       '',
       '      var rowVals = [',
       '        \'=HYPERLINK("\' + profileUrl + \'", "\' + cleanUser + \'")\',',
@@ -1641,15 +1878,16 @@
       '        Number(item.avgLikes) || 0,',
       '        Number(item.avgComments) || 0,',
       '        Math.round((Number(item.likesPerComment) || 0) * 10) / 10,',
-      '        price',
+      '        price,',
+      '        contact',
       '      ];',
       '',
       '      if (existingMap[uKey]) {',
-      '        sheet.getRange(existingMap[uKey].rowIndex, 1, 1, 9).setValues([rowVals]);',
+      '        sheet.getRange(existingMap[uKey].rowIndex, 1, 1, NUM_COLS).setValues([rowVals]);',
       '        updatedCount++;',
       '      } else {',
       '        sheet.appendRow(rowVals);',
-      '        existingMap[uKey] = { rowIndex: sheet.getLastRow(), pricePerReel: price };',
+      '        existingMap[uKey] = { rowIndex: sheet.getLastRow(), pricePerReel: price, contactInfo: contact };',
       '        appendedCount++;',
       '      }',
       '    }',
@@ -1790,7 +2028,7 @@
 
     const spreadsheetId = parsed.spreadsheetId;
     const rangePrefix = sheetName ? `'${sheetName.replace(/'/g, "''")}'!` : '';
-    const readRange = `${rangePrefix}A1:I10000`;
+    const readRange = `${rangePrefix}A1:J10000`;
     const authHeaders = {
       'Authorization': `Bearer ${accessToken}`,
       'Content-Type': 'application/json'
@@ -1824,7 +2062,7 @@
       ...(canWriteHeaderAtRow1
         ? [
             {
-              range: `${rangePrefix}A1:I1`,
+              range: `${rangePrefix}A1:J1`,
               values: [plan.headers]
             }
           ]
@@ -1855,7 +2093,7 @@
     }
 
     if (plan.appends.length > 0) {
-      const appendRange = `${rangePrefix}A1:I1`;
+      const appendRange = `${rangePrefix}A1:J1`;
       const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(appendRange)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
       const appendRes = await fetcher(appendUrl, {
         method: 'POST',
@@ -1902,6 +2140,11 @@
     normalizeAndDetectPinnedPosts,
     selectRecentNonPinnedPosts,
     calculateProfileMetrics,
+    computeReelAverages,
+    deriveRateMetrics,
+    recalculateProfileMetrics,
+    assessProfileQuality,
+    buildPostUrl,
     formatNumberWithCommas,
     formatLikesPerComment,
     generateCsvContent,

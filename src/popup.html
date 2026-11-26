@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Crow Scrapper by @mhrshadfm</title>
   <link rel="stylesheet" href="popup.css" />
+  <link rel="stylesheet" href="editor.css" />
 </head>
 <body>
   <div class="popup-container">
@@ -13,64 +14,60 @@
         <span class="brand-icon" title="Crow Scrapper by @mhrshadfm">
           <img src="../icons/crow-white.png" alt="Crow Scrapper Logo" class="brand-logo-img" />
         </span>
-        <div>
+        <div class="brand-text">
           <div class="brand-title-row">
             <h1>Crow Scrapper</h1>
-            <span class="owner-badge">by <a href="https://www.instagram.com/mhrshadfm/" target="_blank" rel="noopener noreferrer" class="owner-link">@mhrshadfm</a></span>
+            <span class="version-pill">v1.2.0</span>
           </div>
-          <p class="subtitle">6 Recent Non-Pinned Reels · V.R. Bands · E.R. Benchmarks · Google Sheet Sync</p>
+          <span class="owner-badge">by <a href="https://www.instagram.com/mhrshadfm/" target="_blank" rel="noopener noreferrer" class="owner-link">@mhrshadfm</a></span>
         </div>
       </div>
-      <div class="header-actions">
-        <button id="scrape-active-btn" class="btn btn-primary" type="button">
-          ⚡ Scrape Active Profile
-        </button>
-      </div>
+      <button id="scrape-active-btn" class="btn btn-primary" type="button" title="Scrape the Instagram profile open in the current tab">
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z"/></svg>
+        Scrape Active Profile
+      </button>
     </header>
 
-    <div id="status-banner" class="status-banner hidden"></div>
+    <div id="status-banner" class="status-banner hidden" role="status" aria-live="polite"></div>
 
     <section class="toolbar">
-      <div class="list-meta-group">
-        <div class="list-meta">
-          <span>Scraped Profiles:</span>
+      <div class="toolbar-left">
+        <div class="list-meta" title="Profiles in your list">
           <strong id="profile-count">0</strong>
+          <span>profiles</span>
+          <span id="profile-warn-count" class="warn-count hidden"></span>
         </div>
-        <label class="skip-recent-label" title="When enabled, excludes the single most recent post/reel in addition to pinned posts">
-          <input type="checkbox" id="skip-most-recent-checkbox" />
-          <span>Skip most recent post/reel</span>
+        <label class="search-box">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Zm5.3-2.2L21 21"/></svg>
+          <input id="popup-search" type="search" placeholder="Search username, ID or phone" autocomplete="off" spellcheck="false" />
         </label>
       </div>
       <div class="export-group">
-        <button id="sync-sheet-btn" class="btn btn-sheet" type="button" title="Sync deduplicated profile list to Shared Google Sheet">
-          🔄 Sync Google Sheet
-        </button>
-        <button id="export-xlsx-btn" class="btn btn-xlsx" type="button" title="Download Excel (.xlsx) with clickable usernames">
-          📥 Export Excel (.xlsx)
-        </button>
-        <button id="export-csv-btn" class="btn btn-csv" type="button" title="Download CSV (.csv)">
-          📄 Export CSV (.csv)
-        </button>
-        <button id="clear-list-btn" class="btn btn-danger" type="button" title="Clear all scraped profiles">
-          🗑️ Clear
-        </button>
+        <button id="sync-sheet-btn" class="btn btn-sheet" type="button" title="Sync the list to your Shared Google Sheet (no duplicates)">☁ Sync</button>
+        <button id="export-xlsx-btn" class="btn" type="button" title="Download Excel (.xlsx) with clickable usernames">Excel</button>
+        <button id="export-csv-btn" class="btn" type="button" title="Download CSV (.csv)">CSV</button>
+        <button id="clear-list-btn" class="btn btn-danger" type="button" title="Clear all scraped profiles">Clear</button>
       </div>
     </section>
 
-    <section class="benchmarks-legend">
-      <div class="legend-row">
-        <strong>V.R. Bands:</strong>
-        <span>Very low ≤10% · Low 10-15% · Medium 15-30% · High 30-50% · Very high ≥50%</span>
-      </div>
-      <div class="legend-row">
-        <strong>E.R. Benchmarks:</strong>
-        <span>≤1K: 8% · 1K-5K: 5.7% · 5K-10K: 4% · 10K-100K: 2.4% · ≥100K: 1.7%</span>
-      </div>
+    <section class="options-row">
+      <label class="switch" title="When enabled, also excludes the single most recent post/reel (besides pinned posts)">
+        <input type="checkbox" id="skip-most-recent-checkbox" />
+        <span class="switch-track" aria-hidden="true"></span>
+        <span>Skip most recent post/reel</span>
+      </label>
+      <details class="legend">
+        <summary>ⓘ Benchmarks</summary>
+        <div class="legend-body">
+          <div><strong>V.R. Bands</strong> Very low ≤10% · Low 10-15% · Medium 15-30% · High 30-50% · Very high ≥50%</div>
+          <div><strong>E.R. Benchmarks</strong> ≤1K: 8% · 1K-5K: 5.7% · 5K-10K: 4% · 10K-100K: 2.4% · ≥100K: 1.7%</div>
+        </div>
+      </details>
     </section>
 
     <details class="sheet-sync-section" id="sheet-sync-section">
       <summary class="sheet-sync-summary">
-        <span>☁️ Shared Google Sheet Connection &amp; Auto-Deduplication</span>
+        <span>☁ Shared Google Sheet connection</span>
         <span class="sheet-sync-hint">Click to configure</span>
       </summary>
       <div class="sheet-sync-body">
@@ -84,7 +81,7 @@
             />
           </div>
           <div class="sheet-field">
-            <label for="sheet-webapp-input">Apps Script Web App URL (Recommended · Zero OAuth)</label>
+            <label for="sheet-webapp-input">Apps Script Web App URL (recommended · no OAuth)</label>
             <input
               id="sheet-webapp-input"
               type="url"
@@ -92,25 +89,25 @@
             />
           </div>
           <div class="sheet-field">
-            <label for="sheet-token-input">Google OAuth Access Token (Optional · Direct Sheets API v4)</label>
+            <label for="sheet-token-input">Google OAuth Access Token (optional · Sheets API v4)</label>
             <input
               id="sheet-token-input"
               type="password"
-              placeholder="ya29... (optional if using Apps Script Web App URL)"
+              placeholder="ya29... (optional if using the Apps Script Web App URL)"
             />
           </div>
         </div>
         <div class="sheet-actions-row">
           <label class="sheet-autosync-label">
             <input type="checkbox" id="sheet-autosync-checkbox" />
-            <span>Auto-add/update in Google Sheet on Scrape (strictly no duplicates)</span>
+            <span>Auto-add/update in Google Sheet on every scrape (never duplicates)</span>
           </label>
           <div class="sheet-btn-group">
-            <button id="copy-sheet-script-btn" class="btn btn-secondary" type="button" title="Copy ready-to-paste Google Apps Script for your shared Google Sheet">
-              📋 Copy Google Sheet Script
+            <button id="copy-sheet-script-btn" class="btn" type="button" title="Copy the ready-to-paste Google Apps Script for your sheet">
+              📋 Copy Sheet Script
             </button>
             <button id="save-sheet-config-btn" class="btn btn-sheet" type="button">
-              💾 Save &amp; Sync Sheet
+              Save &amp; Sync
             </button>
           </div>
         </div>
@@ -123,21 +120,22 @@
           <thead>
             <tr>
               <th class="col-username">USERNAME</th>
-              <th class="col-follower">Follower</th>
-              <th class="col-er">ER</th>
-              <th class="col-vr">V.R.</th>
-              <th class="col-avview">AV VIEW</th>
-              <th class="col-avlike">AV LIKE</th>
-              <th class="col-avcomments">AV COMMENTS</th>
-              <th class="col-lpc">LIKES PER COMMENT</th>
+              <th class="col-num">Follower</th>
+              <th class="col-num">ER</th>
+              <th class="col-num">V.R.</th>
+              <th class="col-num">AV VIEW</th>
+              <th class="col-num">AV LIKE</th>
+              <th class="col-num">AV COMMENTS</th>
+              <th class="col-num">LIKES PER COMMENT</th>
               <th class="col-price">Price/REEL</th>
-              <th class="col-action"></th>
+              <th class="col-contact">ID/Phone</th>
+              <th class="col-action"><span class="visually-hidden">Actions</span></th>
             </tr>
           </thead>
           <tbody id="results-tbody">
             <tr>
-              <td colspan="10" class="empty-state">
-                No profiles in list yet. Open an Instagram profile and click <strong>"Scrape Profile"</strong> next to their username!
+              <td colspan="11" class="empty-state">
+                No profiles yet. Open an Instagram profile and press <strong>Scrape Profile</strong> next to the username.
               </td>
             </tr>
           </tbody>
@@ -146,12 +144,13 @@
     </section>
 
     <footer class="popup-footer">
-      <span>📌 Pinned posts are automatically excluded. Duplicate usernames are updated in place (never added twice).</span>
-      <span class="owner-footer-credit">Created &amp; Owned by <a href="https://www.instagram.com/mhrshadfm/" target="_blank" rel="noopener noreferrer" class="owner-footer-link">@mhrshadfm</a></span>
+      <span>Pinned posts are skipped · duplicates update in place · ⚠ rows look mis-scraped — ✎ fix or ↻ re-scrape fresh.</span>
+      <span class="owner-footer-credit">Created &amp; owned by <a href="https://www.instagram.com/mhrshadfm/" target="_blank" rel="noopener noreferrer" class="owner-footer-link">@mhrshadfm</a></span>
     </footer>
   </div>
 
   <script src="core.js"></script>
+  <script src="editor.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

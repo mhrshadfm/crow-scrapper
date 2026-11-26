@@ -5,7 +5,7 @@ const { execFileSync } = require('node:child_process');
 const Core = require('../src/core.js');
 
 function testXlsxWithPython() {
-  console.log('1. Validating generated 9-column .xlsx ZIP integrity, XML schemas, styles, empty Price/REEL column, and clickable hyperlinks via Python...');
+  console.log('1. Validating generated 10-column .xlsx ZIP integrity, XML schemas, styles, empty Price/REEL + ID/Phone columns, and clickable hyperlinks via Python...');
   const profiles = [
     Core.calculateProfileMetrics({
       username: 'mmd.fate',
@@ -58,8 +58,8 @@ with zipfile.ZipFile(xlsx_path, 'r') as zf:
     # Verify sharedStrings contain the 9 headers, usernames, and K/M AV VIEW strings
     sst = ET.fromstring(zf.read('xl/sharedStrings.xml'))
     strings = [t.text for t in sst.iter('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t')]
-    expected_headers = ['USERNAME', 'Follower', 'ER', 'V.R.', 'AV VIEW', 'AV LIKE', 'AV COMMENTS', 'LIKES PER COMMENT', 'Price/REEL']
-    assert strings[:9] == expected_headers, f"Unexpected headers: {strings[:9]}"
+    expected_headers = ['USERNAME', 'Follower', 'ER', 'V.R.', 'AV VIEW', 'AV LIKE', 'AV COMMENTS', 'LIKES PER COMMENT', 'Price/REEL', 'ID/Phone']
+    assert strings[:10] == expected_headers, f"Unexpected headers: {strings[:10]}"
     assert 'mmd.fate' in strings
     assert 'gallery_mahshid' in strings
     assert 'million_creator' in strings
@@ -79,7 +79,7 @@ with zipfile.ZipFile(xlsx_path, 'r') as zf:
         'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
     }
     dim = sheet.find('main:dimension', ns)
-    assert dim is not None and dim.attrib.get('ref') == 'A1:I4', f"Expected A1:I4 dimension, got {dim.attrib if dim is not None else None}"
+    assert dim is not None and dim.attrib.get('ref') == 'A1:J4', f"Expected A1:J4 dimension, got {dim.attrib if dim is not None else None}"
 
     # Verify Column E (AV VIEW) cells are shared strings pointing to '120K', '45K', '1.5M'
     for cell_ref, expected_av_view in [('E2', '120K'), ('E3', '45K'), ('E4', '1.5M')]:
@@ -88,8 +88,8 @@ with zipfile.ZipFile(xlsx_path, 'r') as zf:
         val_el = cell.find('main:v', ns)
         assert val_el is not None and strings[int(val_el.text)] == expected_av_view, f"Expected {expected_av_view} at {cell_ref}"
 
-    # Check that I2, I3, I4 exist and have no value child (empty Price/REEL at the end of the row)
-    for cell_ref in ['I2', 'I3', 'I4']:
+    # Check that I2..I4 (Price/REEL) and J2..J4 (ID/Phone) exist and are empty by default
+    for cell_ref in ['I2', 'I3', 'I4', 'J2', 'J3', 'J4']:
         cell = sheet.find(f".//main:c[@r='{cell_ref}']", ns)
         assert cell is not None, f"Missing cell {cell_ref}"
         val_el = cell.find('main:v', ns)
@@ -121,7 +121,7 @@ with zipfile.ZipFile(xlsx_path, 'r') as zf:
     sheet_el = wb.find('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet')
     assert sheet_el is not None and sheet_el.attrib.get('name') == 'Crow Scrapper', f"Expected sheet name 'Crow Scrapper', got {sheet_el.attrib if sheet_el is not None else None}"
 
-print("   [OK] Python ZIP CRC32, XML schema, 9-column header styles, K/M AV VIEW strings, empty Price/REEL cells, and external hyperlink verification passed!")
+print("   [OK] Python ZIP CRC32, XML schema, 10-column header styles, K/M AV VIEW strings, empty Price/REEL + ID/Phone cells, and external hyperlink verification passed!")
 `;
 
   const out = execFileSync('python', ['-c', pyScript, tmpXlsx], { encoding: 'utf8' });

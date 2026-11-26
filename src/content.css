@@ -65,202 +65,659 @@
   background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
 }
 
-/* Floating In-Page Panel */
-.ig-scraper-panel {
+/* ==========================================================================
+   In-Page Panel (v1.2.0) — draggable crow launcher at the top + premium card
+   ========================================================================== */
+
+#ig-scraper-panel {
+  --crow-surface: rgba(17, 19, 28, 0.94);
+  --crow-surface-2: rgba(255, 255, 255, 0.035);
+  --crow-border: rgba(255, 255, 255, 0.08);
+  --crow-border-strong: rgba(255, 255, 255, 0.14);
+  --crow-text: #eceef4;
+  --crow-muted: #9aa3b5;
+  --crow-faint: #6b7488;
+  --crow-accent: #8b5cf6;
+  --crow-accent-2: #6366f1;
   position: fixed;
+  top: 16px;
   right: 20px;
-  bottom: 20px;
-  width: 820px;
-  max-width: calc(100vw - 32px);
-  background: #ffffff;
-  color: #111827;
-  border-radius: 12px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(0, 0, 0, 0.08);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  font-size: 12.5px;
-  z-index: 999999;
-  overflow: hidden;
-  transition: all 0.2s ease;
+  z-index: 2147483000;
+  width: 46px;
+  height: 46px;
+  color-scheme: dark;
 }
 
-.ig-scraper-panel-collapsed {
-  width: auto;
-  min-width: 440px;
+/* Neutralize page-wide element styles (Instagram or other) leaking into the panel. */
+#ig-scraper-panel div,
+#ig-scraper-panel section,
+#ig-scraper-panel table,
+#ig-scraper-panel label,
+#ig-scraper-panel button,
+#ig-scraper-panel input,
+#ig-scraper-panel select,
+#ig-scraper-panel a,
+#ig-scraper-panel span {
+  margin: 0;
 }
 
-.ig-scraper-panel-collapsed .ig-scraper-panel-body {
+#ig-scraper-panel,
+#ig-scraper-panel * {
+  box-sizing: border-box;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  letter-spacing: normal;
+}
+
+.crow-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  white-space: nowrap !important;
+}
+
+/* ---------- Launcher (the only thing visible when minimized) ---------- */
+
+.crow-launcher {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  border-radius: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background:
+    radial-gradient(120% 120% at 20% 10%, rgba(139, 92, 246, 0.55) 0%, rgba(139, 92, 246, 0) 55%),
+    linear-gradient(160deg, #1c1f2e 0%, #0b0d14 100%);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  transition: transform 0.15s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.crow-launcher:hover {
+  transform: translateY(-1px);
+  border-color: rgba(139, 92, 246, 0.6);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5), 0 0 0 4px rgba(139, 92, 246, 0.16);
+}
+
+.crow-launcher:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.55);
+}
+
+.crow-launcher-dragging {
+  cursor: grabbing;
+  transform: scale(1.04);
+}
+
+#ig-scraper-panel:not(.ig-scraper-panel-collapsed) .crow-launcher {
+  border-color: rgba(139, 92, 246, 0.7);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45), 0 0 0 3px rgba(139, 92, 246, 0.25);
+}
+
+.crow-launcher-logo {
+  width: 26px;
+  height: 26px;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
+}
+
+.crow-launcher-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 2px solid #0b0d14;
+  background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 800;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.crow-launcher-badge[hidden] {
   display: none;
 }
 
-.ig-scraper-panel-header {
+.crow-launcher-badge-warn {
+  background: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%);
+}
+
+/* ---------- Card ---------- */
+
+.crow-card {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--crow-text);
+  background: var(--crow-surface);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid var(--crow-border);
+  border-radius: 18px;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(139, 92, 246, 0.06);
+  font-size: 12.5px;
+  line-height: 1.4;
+  animation: crow-card-in 0.16s ease-out;
+}
+
+.crow-card-up {
+  animation-name: crow-card-in-up;
+}
+
+@keyframes crow-card-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes crow-card-in-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.ig-scraper-panel-collapsed .crow-card {
+  display: none;
+}
+
+/* ---------- Resizing (drag the edge / corner away from the icon) ---------- */
+
+.crow-resize {
+  position: absolute;
+  z-index: 3;
+  touch-action: none;
+  outline: none;
+}
+
+.crow-resize-x {
+  top: 18px;
+  bottom: 18px;
+  left: 0;
+  width: 7px;
+  cursor: ew-resize;
+}
+
+.crow-anchor-left .crow-resize-x {
+  left: auto;
+  right: 0;
+}
+
+.crow-resize-y {
+  left: 18px;
+  right: 18px;
+  bottom: 0;
+  height: 7px;
+  cursor: ns-resize;
+}
+
+.crow-card-up .crow-resize-y {
+  bottom: auto;
+  top: 0;
+}
+
+.crow-resize-x::after,
+.crow-resize-y::after {
+  content: "";
+  position: absolute;
+  border-radius: 999px;
+  background: var(--crow-accent, #8b5cf6);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.crow-resize-x::after {
+  top: 30%;
+  bottom: 30%;
+  left: 2px;
+  width: 3px;
+}
+
+.crow-anchor-left .crow-resize-x::after {
+  left: auto;
+  right: 2px;
+}
+
+.crow-resize-y::after {
+  left: 35%;
+  right: 35%;
+  bottom: 2px;
+  height: 3px;
+}
+
+.crow-card-up .crow-resize-y::after {
+  bottom: auto;
+  top: 2px;
+}
+
+.crow-resize-x:hover::after,
+.crow-resize-y:hover::after,
+.crow-resize-x:focus-visible::after,
+.crow-resize-y:focus-visible::after,
+.crow-card-resizing .crow-resize::after {
+  opacity: 0.85;
+}
+
+/* Corner grip: bottom-left by default (icon top-right); mirrors with the icon's position. */
+.crow-resize-xy {
+  width: 20px;
+  height: 20px;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+  padding: 4px;
+  box-sizing: border-box;
+  color: var(--crow-muted, #9aa3b5);
+  cursor: nesw-resize;
+  transform: scaleX(-1);
+  transition: color 0.12s ease;
+}
+
+.crow-resize-xy svg {
+  display: block;
+  pointer-events: none;
+}
+
+.crow-resize-xy:hover,
+.crow-card-resizing .crow-resize-xy {
+  color: #c4b5fd;
+}
+
+.crow-anchor-left .crow-resize-xy {
+  left: auto;
+  right: 0;
+  cursor: nwse-resize;
+  transform: none;
+}
+
+.crow-card-up .crow-resize-xy {
+  bottom: auto;
+  top: 0;
+  cursor: nwse-resize;
+  transform: scale(-1, -1);
+}
+
+.crow-card-up.crow-anchor-left .crow-resize-xy {
+  cursor: nesw-resize;
+  transform: scaleY(-1);
+}
+
+.crow-card-resizing {
+  -webkit-user-select: none;
+  user-select: none;
+  animation: none;
+}
+
+.crow-card-resizing * {
+  cursor: inherit;
+}
+
+/* A dragged-to height fills the window; the table scrolls inside it. */
+.crow-card-sized {
+  min-height: 0;
+}
+
+/* Narrow window: let the header wrap and hide the long labels. */
+.crow-card-narrow .crow-card-head {
+  flex-wrap: wrap;
+}
+
+.crow-card-narrow .crow-head-actions {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.crow-card-narrow .crow-switch-label,
+.crow-card-narrow .ig-scraper-footer-owner {
+  display: none;
+}
+
+.crow-card-narrow .crow-search {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.crow-card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 14px;
-  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-  color: #ffffff;
-  cursor: pointer;
-  user-select: none;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--crow-border);
+  background: linear-gradient(180deg, rgba(139, 92, 246, 0.1) 0%, rgba(139, 92, 246, 0) 100%);
 }
 
-.ig-scraper-panel-title {
+.crow-brand {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-weight: 700;
-  font-size: 13.5px;
+  gap: 10px;
+  min-width: 0;
 }
 
 .ig-scraper-logo-badge {
-  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 11px;
+  display: flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-  background: radial-gradient(circle at 30% 30%, #1e293b 0%, #090d16 100%);
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
-  flex-shrink: 0;
+  background: linear-gradient(160deg, #23263a 0%, #0b0d14 100%);
+  border: 1px solid var(--crow-border-strong);
 }
 
 .ig-scraper-panel-crow {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
+}
+
+.crow-brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.crow-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
 }
 
 .ig-scraper-brand-name {
+  font-size: 14px;
   font-weight: 800;
-  color: #ffffff;
-  letter-spacing: 0.2px;
+  color: #fff;
+}
+
+.ig-scraper-badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.2);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  color: #ddd6fe;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .ig-scraper-owner-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.13);
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  color: #38bdf8 !important;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
+  color: #a5b4fc !important;
   text-decoration: none !important;
 }
 
 .ig-scraper-owner-pill:hover {
-  color: #7dd3fc !important;
-  background: rgba(255, 255, 255, 0.2);
+  color: #c7d2fe !important;
+  text-decoration: underline !important;
 }
 
-.ig-scraper-badge {
+.crow-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.crow-btn {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--crow-border-strong);
+  background: rgba(255, 255, 255, 0.05);
+  color: #e6e9f2;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.crow-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.crow-btn:active {
+  transform: translateY(1px);
+}
+
+.crow-btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.crow-btn-sheet {
+  border-color: rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.12);
+  color: #bbf7d0;
+}
+
+.crow-btn-sheet:hover {
+  background: rgba(34, 197, 94, 0.2);
+}
+
+.crow-btn-danger {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.08);
+  color: #fca5a5;
+}
+
+.crow-btn-danger:hover {
+  background: rgba(239, 68, 68, 0.16);
+}
+
+.crow-seg {
+  display: inline-flex;
+}
+
+.crow-seg .crow-btn {
+  border-radius: 0;
+}
+
+.crow-seg .crow-btn:first-child {
+  border-radius: 10px 0 0 10px;
+}
+
+.crow-seg .crow-btn:last-child {
+  border-radius: 0 10px 10px 0;
+  border-left: none;
+}
+
+.crow-icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  border: 1px solid var(--crow-border-strong);
+  background: rgba(255, 255, 255, 0.05);
+  color: #d5dbe7;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 22px;
-  height: 22px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: #3b82f6;
-  color: #ffffff;
-  font-size: 12px;
-  font-weight: 700;
+  cursor: pointer;
 }
 
-.ig-scraper-panel-header-actions {
+.crow-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+/* ---------- Toolbar ---------- */
+
+.crow-toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--crow-border);
 }
 
-.ig-scraper-export-btn {
-  padding: 5px 10px;
-  border-radius: 6px;
-  border: none;
+.crow-search {
+  position: relative;
+  flex: 1 1 220px;
+  min-width: 160px;
+  display: flex;
+  align-items: center;
+}
+
+.crow-search-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--crow-faint);
+  pointer-events: none;
+}
+
+#crow-search {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px 0 31px;
+  border-radius: 10px;
+  border: 1px solid var(--crow-border-strong);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--crow-text);
+  font-size: 12.5px;
+  outline: none;
+}
+
+#crow-search::placeholder {
+  color: var(--crow-faint);
+}
+
+#crow-search:focus,
+#crow-sort:focus {
+  border-color: rgba(139, 92, 246, 0.7);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.18);
+}
+
+#crow-sort {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--crow-border-strong);
+  background: #171a26;
+  color: var(--crow-text);
   font-size: 12px;
   font-weight: 600;
+  outline: none;
   cursor: pointer;
-  color: #ffffff;
-  transition: opacity 0.15s ease;
 }
 
-.ig-scraper-export-btn:hover {
-  opacity: 0.9;
-}
-
-.ig-scraper-sheet-btn {
-  background: #0f9d58;
-}
-
-.ig-scraper-xlsx-btn {
-  background: #16a34a;
-}
-
-.ig-scraper-csv-btn {
-  background: #2563eb;
-}
-
-.ig-scraper-toggle-icon {
-  background: rgba(255, 255, 255, 0.14);
-  color: #ffffff;
-  border: none;
-  border-radius: 6px;
-  width: 26px;
-  height: 26px;
-  cursor: pointer;
-  font-size: 11px;
-}
-
-.ig-scraper-panel-body {
-  padding: 12px;
-  background: #ffffff;
-}
-
-.ig-scraper-controls-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 6px;
-  flex-wrap: wrap;
-}
-
-.ig-scraper-subtitle {
-  font-size: 11.5px;
-  color: #4b5563;
-}
-
-.ig-scraper-skip-toggle {
+.crow-switch {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: #1f2937;
+  gap: 7px;
   cursor: pointer;
   user-select: none;
+  color: var(--crow-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.ig-scraper-benchmarks-bar {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  background: #f1f5f9;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
-  padding: 5px 8px;
-  font-size: 10.5px;
-  color: #334155;
-  margin-bottom: 8px;
+.crow-switch input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 
-.ig-scraper-panel-status {
-  padding: 6px 10px;
-  border-radius: 6px;
+.crow-switch-track {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  transition: background 0.15s ease;
+}
+
+.crow-switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s ease;
+}
+
+.crow-switch input:checked + .crow-switch-track {
+  background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+}
+
+.crow-switch input:checked + .crow-switch-track::after {
+  transform: translateX(14px);
+}
+
+.crow-switch input:focus-visible + .crow-switch-track {
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.35);
+}
+
+.crow-chip-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--crow-border-strong);
+  background: transparent;
+  color: var(--crow-muted);
   font-size: 11.5px;
   font-weight: 600;
-  margin-bottom: 8px;
+  cursor: pointer;
+}
+
+.crow-chip-btn:hover,
+.crow-chip-btn[aria-expanded='true'] {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.crow-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--crow-border);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--crow-muted);
+  font-size: 11.5px;
+}
+
+.crow-legend[hidden] {
+  display: none;
+}
+
+.crow-legend strong {
+  color: #e2e8f0;
+  margin-right: 6px;
+}
+
+.crow-legend-note {
+  color: var(--crow-faint);
+}
+
+/* ---------- Status line ---------- */
+
+#ig-scraper-panel .ig-scraper-panel-status {
+  margin: 8px 14px 0;
+  padding: 8px 11px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid transparent;
 }
 
 .ig-scraper-panel-status.hidden {
@@ -268,188 +725,322 @@
 }
 
 .ig-scraper-panel-status.info {
-  background: #dbeafe;
-  color: #1e40af;
+  background: rgba(99, 102, 241, 0.12);
+  border-color: rgba(99, 102, 241, 0.3);
+  color: #c7d2fe;
 }
 
 .ig-scraper-panel-status.success {
-  background: #d1fae5;
-  color: #065f46;
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.3);
+  color: #bbf7d0;
+}
+
+.ig-scraper-panel-status.warn {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.35);
+  color: #fde68a;
 }
 
 .ig-scraper-panel-status.error {
-  background: #fee2e2;
-  color: #991b1b;
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #fecaca;
 }
 
-.ig-scraper-table-wrap {
-  max-height: 250px;
-  overflow-y: auto;
-  overflow-x: auto;
-  border: 1px solid #111827;
+/* ---------- Table ---------- */
+
+#ig-scraper-panel .crow-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin-top: 8px;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
 
-.ig-scraper-table {
+.crow-table-wrap::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.crow-table-wrap::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.crow-table {
   width: 100%;
-  border-collapse: collapse;
-  font-family: Arial, Helvetica, sans-serif;
-  font-size: 12px;
-  text-align: center;
-  background: #ffffff;
-  color: #000000;
+  min-width: 1000px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-variant-numeric: tabular-nums;
 }
 
-.ig-scraper-table th,
-.ig-scraper-table td {
-  border: 1px solid #374151;
-  padding: 6px 7px;
-  text-align: center;
-  white-space: nowrap;
-}
-
-.ig-scraper-table th {
-  font-weight: 700;
-  color: #000000;
+.crow-table th {
   position: sticky;
   top: 0;
   z-index: 2;
+  padding: 9px 10px;
+  background: #151826;
+  color: var(--crow-faint);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em !important;
+  text-align: right;
+  white-space: normal;
+  line-height: 1.25;
+  max-width: 96px;
+  border-bottom: 1px solid var(--crow-border);
 }
 
-/* Exact Header Colors Matching User Reference */
-.ig-scraper-table th.col-username {
-  background-color: #78c8f0;
+.crow-table th.col-username {
+  text-align: left;
+  left: 0;
+  z-index: 3;
 }
 
-.ig-scraper-table th.col-follower {
-  background-color: #92d050;
+.crow-table th.col-price,
+.crow-table th.col-contact {
+  text-align: left;
 }
 
-.ig-scraper-table th.col-er,
-.ig-scraper-table th.col-vr {
-  background-color: #d878d8;
+.crow-table td {
+  padding: 8px 9px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  color: #e2e6ef;
+  text-align: right;
+  white-space: nowrap;
+  vertical-align: middle;
+  background: transparent;
 }
 
-.ig-scraper-table th.col-avview,
-.ig-scraper-table th.col-avlike,
-.ig-scraper-table th.col-avcomments,
-.ig-scraper-table th.col-lpc,
-.ig-scraper-table th.col-price {
-  background-color: #f4b084;
+.crow-table tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.03);
 }
 
-.ig-scraper-table th.col-del {
-  background-color: #e5e7eb;
-  width: 28px;
+.crow-table td.cell-username {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  text-align: left;
+  background: #12141e;
+}
+
+.crow-table tbody tr:hover td.cell-username {
+  background: #171a26;
+}
+
+.crow-row-warn td.cell-username {
+  box-shadow: inset 3px 0 0 #f59e0b;
+}
+
+.crow-row-new td {
+  animation: crow-row-flash 2.4s ease-out;
+}
+
+@keyframes crow-row-flash {
+  0% { background: rgba(139, 92, 246, 0.28); }
+  100% { background: transparent; }
+}
+
+.crow-user {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 175px;
+}
+
+.crow-avatar {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.crow-user-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .ig-scraper-user-link {
-  color: #0563c1 !important;
-  text-decoration: underline !important;
-  font-weight: 600;
-  cursor: pointer;
+  color: #f8fafc !important;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none !important;
 }
 
 .ig-scraper-user-link:hover {
-  color: #1d4ed8 !important;
+  color: #c4b5fd !important;
+  text-decoration: underline !important;
+}
+
+.crow-user-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--crow-faint);
+  font-size: 10.5px;
+}
+
+.crow-flag {
+  padding: 0 6px;
+  height: 16px;
+  line-height: 16px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  border: none;
+}
+
+.crow-flag-edited {
+  background: rgba(99, 102, 241, 0.18);
+  color: #c7d2fe;
+}
+
+.crow-flag-warn {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fcd34d;
+  cursor: pointer;
+}
+
+.crow-flag-warn:hover {
+  background: rgba(245, 158, 11, 0.3);
+}
+
+.crow-metric {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .ig-metric-val {
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.crow-pill {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.crow-cell-input {
+  width: 100%;
+  min-width: 80px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.05);
+  color: #f1f5f9;
+  font-size: 12px;
   font-weight: 600;
+  outline: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
 
-.ig-metric-badge {
-  display: inline-block;
-  margin-left: 4px;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 700;
-  vertical-align: middle;
+.crow-contact-input {
+  min-width: 128px;
 }
 
-.ig-badge-er-good {
-  background: #dcfce7;
-  color: #166534;
+.crow-cell-input::placeholder {
+  color: var(--crow-faint);
+  font-weight: 500;
 }
 
-.ig-badge-er-low {
-  background: #fef3c7;
-  color: #b45309;
+.crow-cell-input:hover {
+  border-color: var(--crow-border-strong);
 }
 
-.ig-badge-er-bad {
-  background: #fee2e2;
-  color: #b91c1c;
+.crow-cell-input:focus {
+  border-color: rgba(139, 92, 246, 0.7);
+  background: rgba(139, 92, 246, 0.08);
 }
 
-.ig-badge-vr-vhigh {
-  background: #dcfce7;
-  color: #15803d;
+.crow-table td.col-price,
+.crow-table td.col-contact {
+  text-align: left;
 }
 
-.ig-badge-vr-high {
-  background: #d1fae5;
-  color: #047857;
+.crow-row-actions {
+  display: inline-flex;
+  gap: 4px;
 }
 
-.ig-badge-vr-med {
-  background: #fef3c7;
-  color: #b45309;
-}
-
-.ig-badge-vr-low {
-  background: #fef3c7;
-  color: #b45309;
-}
-
-.ig-badge-vr-vlow {
-  background: #fee2e2;
-  color: #b91c1c;
-}
-
-.ig-scraper-price-input {
-  width: 72px;
-  padding: 2px 4px;
-  border: 1px solid #d1d5db;
-  border-radius: 4px;
-  font-size: 11.5px;
-  text-align: center;
-  background: #ffffff;
-  color: #111827;
-}
-
-.ig-scraper-row-del {
-  border: none;
+.crow-row-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid transparent;
   background: transparent;
-  color: #ef4444;
-  font-size: 16px;
-  font-weight: 700;
+  color: var(--crow-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
-  line-height: 1;
-  padding: 0 4px;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
-.ig-scraper-empty-cell {
-  padding: 18px !important;
-  color: #6b7280;
+.crow-row-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
 }
 
-.ig-scraper-panel-footer {
+.crow-row-btn-danger:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+}
+
+.crow-empty {
+  padding: 34px 16px !important;
+  text-align: center !important;
+  white-space: normal !important;
+  color: var(--crow-muted) !important;
+}
+
+#ig-scraper-panel .crow-empty-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: #e2e8f0;
+  margin-bottom: 4px;
+}
+
+/* ---------- Footer ---------- */
+
+.crow-card-foot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-top: 8px;
+  gap: 12px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--crow-border);
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--crow-faint);
+  font-size: 11.5px;
 }
 
-.ig-scraper-footer-owner {
-  font-size: 11px;
-  font-weight: 600;
-  color: #4b5563;
+.crow-foot-summary {
+  flex: 1;
+  text-align: right;
+  color: var(--crow-muted);
 }
 
 .ig-scraper-footer-owner-link {
-  color: #0284c7 !important;
+  color: #a5b4fc !important;
   font-weight: 700;
   text-decoration: none !important;
 }
@@ -458,18 +1049,45 @@
   text-decoration: underline !important;
 }
 
-.ig-scraper-clear-btn {
-  padding: 4px 10px;
-  border: 1px solid #d1d5db;
-  background: #f9fafb;
-  color: #374151;
-  border-radius: 6px;
-  font-size: 11.5px;
-  cursor: pointer;
+/* ---------- Toast (shown next to the icon while minimized) ---------- */
+
+.crow-toast {
+  position: fixed;
+  max-width: min(380px, calc(100vw - 24px));
+  padding: 10px 13px;
+  border-radius: 12px;
+  border: 1px solid var(--crow-border-strong);
+  background: rgba(17, 19, 28, 0.96);
+  color: var(--crow-text);
+  font-size: 12.5px;
+  font-weight: 600;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  animation: crow-card-in 0.16s ease-out;
+  pointer-events: none;
 }
 
-.ig-scraper-clear-btn:hover {
-  background: #fee2e2;
-  color: #b91c1c;
-  border-color: #fca5a5;
+.crow-toast[hidden] {
+  display: none;
+}
+
+.crow-toast-success {
+  border-color: rgba(34, 197, 94, 0.45);
+}
+
+.crow-toast-error {
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #fecaca;
+}
+
+@media (max-width: 700px) {
+  .crow-card-head {
+    flex-wrap: wrap;
+  }
+  .crow-head-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .crow-switch-label {
+    display: none;
+  }
 }
